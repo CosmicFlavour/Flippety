@@ -66,15 +66,17 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
 
-  # NOTE: this job is new and hasn't been run yet — `tauri android init` has
-  # never been exercised in this project (no Android SDK available to test
-  # locally either), so treat the first run as the real test and expect to
-  # iterate on SDK/NDK versions if it fails.
+  # Verified working locally with these exact SDK/NDK/JDK versions (see
+  # commit history) — `tauri android init` + `tauri android build --debug`
+  # produce an installable APK.
   #
   # Produces a debug-signed APK (sideloadable, not a signed release build).
   # Play Store distribution needs a release keystore + signing config, which
   # isn't set up here.
   build-android:
+    needs: create-release
+    permissions:
+      contents: write
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -105,9 +107,18 @@ jobs:
         run: pnpm tauri android init --ci
       - name: tauri android build (debug APK)
         run: pnpm tauri android build --ci --debug --apk
+      - name: rename APK for release
+        run: |
+          apk="$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n1)"
+          cp "$apk" "flippety-${{ github.ref_name }}-android-debug.apk"
       - name: upload APK artifact
         uses: actions/upload-artifact@v7
         with:
           name: flippety-android-debug
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          path: flippety-${{ github.ref_name }}-android-debug.apk
           if-no-files-found: error
+      - name: attach APK to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: flippety-${{ github.ref_name }}-android-debug.apk
