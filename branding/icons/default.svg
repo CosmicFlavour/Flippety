@@ -1,0 +1,14 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="1024" height="1024" fill="#4B3F72"/>
+  <g transform="translate(512,512)">
+    <clipPath id="card">
+      <rect x="-168" y="-308" width="336" height="616" rx="56"/>
+    </clipPath>
+    <g clip-path="url(#card)">
+      <rect x="-168" y="-308" width="336" height="616" fill="#FBF6EF"/>
+      <rect x="0" y="-308" width="168" height="616" fill="#FF6F59"/>
+      <rect x="-3" y="-308" width="6" height="616" fill="#4B3F72"/>
+      <path d="M -168 -308 L -84 -308 L -168 -224 Z" fill="#4B3F72" opacity="0.28"/>
+    </g>
+  </g>
+</svg>

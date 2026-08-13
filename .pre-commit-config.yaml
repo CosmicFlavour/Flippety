@@ -1,0 +1,28 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --manifest-path src-tauri/Cargo.toml --
+        language: system
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+        language: system
+        pass_filenames: false
+
+      - id: tsc
+        name: tsc
+        entry: pnpm exec tsc --noEmit
+        language: system
+        pass_filenames: false
+        files: \.(ts|tsx)$
+
+      - id: vitest
+        name: vitest
+        entry: pnpm exec vitest run
+        language: system
+        pass_filenames: false
+        files: \.(ts|tsx)$
