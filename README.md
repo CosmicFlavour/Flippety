@@ -79,7 +79,50 @@ The frontend holds no business logic — validation, scheduling, and persistence
 
 ## Data storage
 
-Flippety stores its SQLite database in the platform-appropriate app data directory (via Tauri's `app_data_dir()`), e.g. `~/.local/share/flippety/flippety.db` on Linux. Deleting that file resets the app to a blank state.
+Flippety stores its SQLite database in the platform-appropriate app data directory (via Tauri's `app_data_dir()`), e.g. `~/.local/share/io.github.cosmicflavour.flippety/flippety.db` on Linux. Deleting that file resets the app to a blank state.
+
+## Deck JSON format
+
+Import/export uses a single JSON file per deck. It's content only — no FSRS scheduling state, no review history — so importing or re-importing a deck never resets progress on cards it already knows about (see [Data storage](#data-storage) for where that progress actually lives).
+
+```json
+{
+  "deck": {
+    "name": "Chinese HSK1",
+    "description": "Core HSK1 vocabulary"
+  },
+  "cards": [
+    {
+      "id": "3a1f9e2c-2b7a-4e3a-9f1a-6b8b6a2b9d10",
+      "face_1": "dog",
+      "face_2": "狗",
+      "full": {
+        "title": "狗",
+        "subtitle": "gǒu",
+        "body": "Domestic dog. Composed of 犭(dog radical) + 句(sound).",
+        "foot": "这是我的狗。 — This is my dog."
+      },
+      "tags": ["animals", "hsk1"],
+      "directions": ["1->2", "2->1"],
+      "level": 1
+    }
+  ]
+}
+```
+
+| Field                | Type                   | Required | Notes                                                                                                                                                                                          |
+| -------------------- | ---------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deck.name`          | string                 | yes      | Trimmed and validated non-empty on import.                                                                                                                                                     |
+| `deck.description`   | string or `null`       | no       |                                                                                                                                                                                                |
+| `cards[].id`         | string                 | no       | Omit for a new card. On **merge** import, a card whose `id` matches an existing card updates its content in place without touching its review progress; a new/omitted `id` creates a new card. |
+| `cards[].face_1`     | string                 | yes      | The face_1 → face_2 prompt. Must be non-empty.                                                                                                                                                 |
+| `cards[].face_2`     | string                 | yes      | The face_2 → face_1 prompt. Must be non-empty.                                                                                                                                                 |
+| `cards[].full`       | object                 | yes      | The revealed answer: `{ "title", "subtitle", "body", "foot" }`, all strings (empty string is fine, the field just can't be omitted).                                                           |
+| `cards[].tags`       | string[]               | no       | Defaults to `[]`.                                                                                                                                                                              |
+| `cards[].directions` | `("1->2" \| "2->1")[]` | no       | Which direction(s) generate review items. Defaults to both. Must contain at least one entry.                                                                                                   |
+| `cards[].level`      | integer                | no       | Introduction order — lower levels are introduced to you before higher ones. Defaults to `1`.                                                                                                   |
+
+Export always includes every field (including `id`, so re-importing round-trips card identity); import fills in the optional ones with the defaults above when they're missing, so hand-written or older-format decks still work.
 
 ## Contributing
 
