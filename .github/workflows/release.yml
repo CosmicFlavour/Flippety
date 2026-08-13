@@ -105,6 +105,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: tauri android init
         run: pnpm tauri android init --ci
+      - name: regenerate icons into the freshly-created Android project
+        # `tauri icon` writes mobile icons directly into `gen/android`, which
+        # only exists after `android init` — without this the app ships with
+        # a default placeholder icon instead of the real one.
+        run: pnpm tauri icon src-tauri/icons/icon.png
       - name: tauri android build (debug APK)
         run: pnpm tauri android build --ci --debug --apk
       - name: rename APK for release
