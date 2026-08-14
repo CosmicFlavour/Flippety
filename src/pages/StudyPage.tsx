@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { Deck, DueItem, Rating } from "@/types/models";
+import type { Deck, Direction, DueItem, Rating } from "@/types/models";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 
@@ -64,20 +64,20 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     loadMore(false);
   }, [index, queue.length, noMoreAvailable, loadMore]);
 
+  // Optimistic: the next card shows immediately on click rather than
+  // waiting on the round-trip, since there's nothing the UI actually needs
+  // from the response (the rating is just persisted server-side).
   const submitReview = useMutation({
-    mutationFn: (rating: Rating) => {
-      const item = queue[index];
-      return api.study.submitReview({
-        card_id: item.card_id,
-        direction: item.direction,
-        rating,
-      });
-    },
-    onSuccess: () => {
-      setIndex((i) => i + 1);
-      setRevealed(false);
-    },
+    mutationFn: (input: { card_id: string; direction: Direction; rating: Rating }) =>
+      api.study.submitReview(input),
   });
+
+  const rate = (rating: Rating) => {
+    const current = queue[index];
+    submitReview.mutate({ card_id: current.card_id, direction: current.direction, rating });
+    setIndex((i) => i + 1);
+    setRevealed(false);
+  };
 
   const header = (
     <div className="flex items-center gap-2">
@@ -154,16 +154,17 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
       {item && revealed && (
         <div className="grid grid-cols-4 gap-2">
           {RATINGS.map((rating) => (
-            <Button
-              key={rating}
-              variant="outline"
-              disabled={submitReview.isPending}
-              onClick={() => submitReview.mutate(rating)}
-            >
+            <Button key={rating} variant="outline" onClick={() => rate(rating)}>
               {rating}
             </Button>
           ))}
         </div>
+      )}
+
+      {submitReview.isError && (
+        <p className="text-sm text-destructive">
+          Couldn't save your last rating — it may need to be repeated.
+        </p>
       )}
 
       {index > 0 && <p className="text-sm text-muted-foreground">{index} studied this session</p>}

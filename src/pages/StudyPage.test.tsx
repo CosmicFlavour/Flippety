@@ -118,6 +118,49 @@ describe("StudyPage", () => {
     });
   });
 
+  it("advances to the next card immediately, without waiting for the rating to be saved", async () => {
+    const user = userEvent.setup();
+    mockStudyBatch([
+      item({ card_id: "card-1", prompt: "dog" }),
+      item({ card_id: "card-2", prompt: "cat", full: { title: "猫", subtitle: "", body: "", foot: "" } }),
+    ]);
+    let resolveSubmit: () => void = () => {};
+    vi.mocked(api.study.submitReview).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSubmit = () => resolve(undefined);
+        }),
+    );
+    renderStudyPage();
+    await screen.findByText("dog");
+    await user.click(screen.getByRole("button", { name: "Reveal" }));
+
+    await user.click(screen.getByRole("button", { name: "Good" }));
+
+    // The save hasn't resolved yet, but the next card should already be showing.
+    expect(await screen.findByText("cat")).toBeInTheDocument();
+    resolveSubmit();
+  });
+
+  it("shows an error if saving a rating fails, without blocking navigation to the next card", async () => {
+    const user = userEvent.setup();
+    mockStudyBatch([
+      item({ card_id: "card-1", prompt: "dog" }),
+      item({ card_id: "card-2", prompt: "cat", full: { title: "猫", subtitle: "", body: "", foot: "" } }),
+    ]);
+    vi.mocked(api.study.submitReview).mockRejectedValue(new Error("network error"));
+    renderStudyPage();
+    await screen.findByText("dog");
+    await user.click(screen.getByRole("button", { name: "Reveal" }));
+
+    await user.click(screen.getByRole("button", { name: "Good" }));
+
+    expect(await screen.findByText("cat")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Couldn't save your last rating — it may need to be repeated."),
+    ).toBeInTheDocument();
+  });
+
   it("advances to the next card and hides the solution again after rating", async () => {
     const user = userEvent.setup();
     mockStudyBatch([
