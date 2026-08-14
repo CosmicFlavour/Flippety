@@ -116,6 +116,11 @@ fn get_due_queue_inner(
         due.extend(new_items);
     }
 
+    // Otherwise due-review items sort oldest-due-first and a new card's two
+    // directions are pushed back-to-back, so the two sides of a card would
+    // almost always land next to each other in the session.
+    due.shuffle(&mut rand::thread_rng());
+
     let mut items = Vec::with_capacity(due.len());
     for (card_id, direction) in due {
         let card = db::cards::get(conn, &card_id)?
@@ -259,6 +264,41 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].direction, Direction::FaceTwoToOne);
         assert_eq!(items[0].prompt, "狗");
+    }
+
+    #[test]
+    fn due_queue_shuffles_the_order_of_due_items() {
+        let conn = db::test_connection();
+        let deck = new_deck(&conn, "Deck");
+        let now = Utc::now();
+        let mut card_ids = std::collections::HashSet::new();
+        for i in 0..8 {
+            let card = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
+            let mut fsrs_card = crate::srs::new_card_state(now);
+            fsrs_card.state = State::Review;
+            fsrs_card.reps = 1;
+            fsrs_card.due = now - chrono::Duration::minutes(i);
+            db::review_state::upsert(&conn, &card.id, Direction::FaceOneToTwo, &fsrs_card).unwrap();
+            card_ids.insert(card.id);
+        }
+
+        let first = get_due_queue_inner(&conn, Some(&deck.id), 8).unwrap();
+        let second = get_due_queue_inner(&conn, Some(&deck.id), 8).unwrap();
+
+        let first_order: Vec<&str> = first.iter().map(|i| i.card_id.as_str()).collect();
+        let second_order: Vec<&str> = second.iter().map(|i| i.card_id.as_str()).collect();
+        assert_eq!(
+            first_order
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            8
+        );
+        assert!(card_ids.iter().all(|id| first_order.contains(&id.as_str())));
+        assert_ne!(
+            first_order, second_order,
+            "expected the due queue order to be shuffled across calls"
+        );
     }
 
     #[test]
