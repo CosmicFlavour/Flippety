@@ -129,5 +129,9 @@
     }
   html {
     @apply font-sans;
+    /* Tailwind's default scale (text sizes, padding, heights, icons, radius)
+       is all rem-based, so bumping the root size scales the whole UI
+       proportionally instead of overriding every component individually. */
+    font-size: 120%;
     }
 }
