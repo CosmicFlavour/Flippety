@@ -10,7 +10,6 @@ use rand::SeedableRng;
 use rs_fsrs::Rating;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use tauri::State;
 
@@ -89,10 +88,17 @@ fn hydrate(conn: &Connection, refs: Vec<QueueRef>) -> AppResult<Vec<DueItem>> {
 }
 
 /// Picks which new cards to introduce for `deck_id`, in level-ascending
-/// order, clustered by a shared tag within a level (so introduction reads as
-/// themed blocks rather than a shuffle) and capped at `per_day_cap` distinct
-/// cards already introduced today (`None` = unlimited). A card contributes
-/// all of its still-New directions at once, so the cap counts cards, not items.
+/// order — levels are a deliberate curriculum sequence (e.g. HSK1 before
+/// HSK2) — with cards fully shuffled *within* a level, and capped at
+/// `per_day_cap` distinct cards already introduced today (`None` =
+/// unlimited). A card contributes all of its still-New directions at once,
+/// so the cap counts cards, not items.
+///
+/// Cards are intentionally *not* sub-clustered by tag/theme within a level:
+/// grouping similar material together ("blocked practice") is well-known to
+/// feel easier in the moment but produce worse long-term retention than
+/// mixing it up ("interleaving"), and in practice most decks have few enough
+/// cards per tag that there was barely anything left to shuffle anyway.
 ///
 /// `per_day_cap` only truncates the *end* of the ordered list — it doesn't
 /// affect how that order is built — so calling this twice with the same
@@ -134,24 +140,9 @@ fn select_new_items(
     }
 
     let mut ordered: Vec<NewCardCandidate> = Vec::new();
-    for group in level_groups {
-        // Cluster by theme (the alphabetically-first tag; untagged cards
-        // share a bucket), then shuffle both the theme order and each
-        // theme's cards so introduction is randomized but still blocky. A
-        // BTreeMap (not HashMap) keeps grouping itself deterministic, since
-        // callers rely on the same seed reproducing the same order — a
-        // HashMap's iteration order isn't a stability guarantee.
-        let mut by_theme: BTreeMap<Option<String>, Vec<NewCardCandidate>> = BTreeMap::new();
-        for candidate in group {
-            let theme = candidate.tags.iter().min().cloned();
-            by_theme.entry(theme).or_default().push(candidate);
-        }
-        let mut theme_groups: Vec<Vec<NewCardCandidate>> = by_theme.into_values().collect();
-        theme_groups.shuffle(rng);
-        for mut theme_group in theme_groups {
-            theme_group.shuffle(rng);
-            ordered.extend(theme_group);
-        }
+    for mut group in level_groups {
+        group.shuffle(rng);
+        ordered.extend(group);
     }
 
     let mut items = Vec::new();

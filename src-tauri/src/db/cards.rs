@@ -202,22 +202,21 @@ pub fn delete(conn: &Connection, id: &str) -> AppResult<bool> {
 }
 
 /// A card still awaiting its first review in at least one direction, along
-/// with what's needed to order/cluster it for introduction: `level` picks
-/// the tier (ascending), `tags` drive theme clustering within a tier, and
-/// `directions` lists only the directions that are still `New`.
+/// with what's needed to order it for introduction: `level` picks the tier
+/// (ascending), and `directions` lists only the directions that are still
+/// `New`.
 pub struct NewCardCandidate {
     pub card_id: String,
     pub level: i64,
-    pub tags: Vec<String>,
     pub directions: Vec<Direction>,
 }
 
 /// New-card candidates for `deck_id`, one row per card, pre-sorted
-/// `level ASC, created_at ASC`. Fine-grained shuffling/clustering happens in
+/// `level ASC, created_at ASC`. Fine-grained shuffling happens in
 /// `commands::study`.
 pub fn new_card_candidates(conn: &Connection, deck_id: &str) -> AppResult<Vec<NewCardCandidate>> {
     let mut stmt = conn.prepare(
-        "SELECT c.id, c.level, c.tags, rs.direction
+        "SELECT c.id, c.level, rs.direction
          FROM cards c
          JOIN review_state rs ON rs.card_id = c.id
          WHERE c.deck_id = ?1 AND rs.state = 'New'
@@ -225,19 +224,17 @@ pub fn new_card_candidates(conn: &Connection, deck_id: &str) -> AppResult<Vec<Ne
     )?;
     let rows = stmt
         .query_map(params![deck_id], |row| {
-            let tags: JsonColumn<Vec<String>> = row.get("tags")?;
             let direction: String = row.get("direction")?;
             Ok((
                 row.get::<_, String>("id")?,
                 row.get::<_, i64>("level")?,
-                tags.0,
                 direction,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut candidates: Vec<NewCardCandidate> = Vec::new();
-    for (card_id, level, tags, direction) in rows {
+    for (card_id, level, direction) in rows {
         let Some(direction) = Direction::parse(&direction) else {
             continue;
         };
@@ -246,7 +243,6 @@ pub fn new_card_candidates(conn: &Connection, deck_id: &str) -> AppResult<Vec<Ne
             None => candidates.push(NewCardCandidate {
                 card_id,
                 level,
-                tags,
                 directions: vec![direction],
             }),
         }
