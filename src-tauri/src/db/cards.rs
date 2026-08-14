@@ -128,6 +128,20 @@ pub fn browse(
     Ok(CardPage { items, total })
 }
 
+/// Distinct tags in use across a deck's cards, alphabetically sorted — feeds
+/// the tag-filter UI in the card browser.
+pub fn distinct_tags(conn: &Connection, deck_id: &str) -> AppResult<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT tags FROM cards WHERE deck_id = ?1")?;
+    let mut tags = std::collections::BTreeSet::new();
+    let rows = stmt.query_map(params![deck_id], |row| {
+        row.get::<_, JsonColumn<Vec<String>>>(0)
+    })?;
+    for row in rows {
+        tags.extend(row?.0);
+    }
+    Ok(tags.into_iter().collect())
+}
+
 pub fn get(conn: &Connection, id: &str) -> AppResult<Option<Card>> {
     conn.query_row(
         &format!("SELECT {SELECT_COLUMNS} FROM cards WHERE id = ?1"),
@@ -412,6 +426,19 @@ mod tests {
 
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].full.title, "catlike");
+    }
+
+    #[test]
+    fn distinct_tags_are_deduplicated_and_sorted() {
+        let conn = db::test_connection();
+        let deck_id = seeded_deck(&conn);
+        insert_titled_card(&conn, &deck_id, "a", &["hsk1", "animals"]);
+        insert_titled_card(&conn, &deck_id, "b", &["animals", "food"]);
+        insert_titled_card(&conn, &deck_id, "c", &[]);
+
+        let tags = distinct_tags(&conn, &deck_id).unwrap();
+
+        assert_eq!(tags, vec!["animals", "food", "hsk1"]);
     }
 
     #[test]

@@ -33,6 +33,7 @@ export const api = {
         limit: options?.limit,
         offset: options?.offset,
       }),
+    listDeckTags: (deckId: string) => invoke<string[]>("list_deck_tags", { deckId }),
     create: (input: NewCard) => invoke<Card>("create_card", { input }),
     update: (input: UpdateCard) => invoke<Card>("update_card", { input }),
     delete: (id: string) => invoke<void>("delete_card", { id }),

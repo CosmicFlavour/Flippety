@@ -104,6 +104,12 @@ pub fn list_cards(
 }
 
 #[tauri::command]
+pub fn list_deck_tags(state: State<AppState>, deck_id: String) -> AppResult<Vec<String>> {
+    let conn = state.conn();
+    db::cards::distinct_tags(&conn, &deck_id)
+}
+
+#[tauri::command]
 pub fn create_card(state: State<AppState>, input: NewCard) -> AppResult<Card> {
     let conn = state.conn();
     create_card_inner(&conn, input)
