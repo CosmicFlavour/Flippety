@@ -1,4 +1,4 @@
-import { Pencil, Trash2 } from "lucide-react";
+import { Layers, Settings } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type { Deck } from "@/types/models";
@@ -11,11 +11,16 @@ import {
   CardAction,
 } from "@/components/ui/card";
 import { DeckFormDialog, type DeckFormValues } from "@/components/DeckFormDialog";
-import { DeleteDeckDialog } from "@/components/DeleteDeckDialog";
-import { ExportDeckButton } from "@/components/ExportDeckButton";
+import { DeckSettingsDialog } from "@/components/DeckSettingsDialog";
 import { ImportDeckDialog } from "@/components/ImportDeckDialog";
 
-export function DecksPage({ onOpenDeck }: { onOpenDeck: (deck: Deck) => void }) {
+export function DecksPage({
+  onStudyDeck,
+  onBrowseDeck,
+}: {
+  onStudyDeck: (deck: Deck) => void;
+  onBrowseDeck: (deck: Deck) => void;
+}) {
   const queryClient = useQueryClient();
   const decksQuery = useQuery({ queryKey: ["decks"], queryFn: api.decks.list });
 
@@ -68,37 +73,30 @@ export function DecksPage({ onOpenDeck }: { onOpenDeck: (deck: Deck) => void }) 
           <UiCard
             key={deck.id}
             className="cursor-pointer transition-colors hover:bg-muted/50"
-            onClick={() => onOpenDeck(deck)}
+            onClick={() => onStudyDeck(deck)}
           >
             <CardHeader>
               <CardTitle>{deck.name}</CardTitle>
               {deck.description && <CardDescription>{deck.description}</CardDescription>}
               <CardAction className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-                <ExportDeckButton deck={deck} />
-                <DeckFormDialog
+                <DeckSettingsDialog
                   trigger={
-                    <Button variant="ghost" size="icon-sm" aria-label="Edit deck">
-                      <Pencil className="size-3.5" />
-                    </Button>
-                  }
-                  title="Edit deck"
-                  submitLabel="Save"
-                  initialValues={{
-                    name: deck.name,
-                    description: deck.description,
-                    new_cards_per_day: deck.new_cards_per_day,
-                  }}
-                  onSubmit={(values) => renameDeck.mutateAsync({ id: deck.id, ...values })}
-                />
-                <DeleteDeckDialog
-                  trigger={
-                    <Button variant="ghost" size="icon-sm" aria-label="Delete deck">
-                      <Trash2 className="size-3.5" />
+                    <Button variant="ghost" size="icon-sm" aria-label="Deck settings">
+                      <Settings className="size-3.5" />
                     </Button>
                   }
                   deck={deck}
+                  onSave={(values) => renameDeck.mutateAsync({ id: deck.id, ...values })}
                   onDelete={() => deleteDeck.mutateAsync(deck.id)}
                 />
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Browse cards"
+                  onClick={() => onBrowseDeck(deck)}
+                >
+                  <Layers className="size-3.5" />
+                </Button>
               </CardAction>
             </CardHeader>
           </UiCard>

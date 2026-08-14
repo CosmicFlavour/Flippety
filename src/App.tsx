@@ -8,7 +8,7 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 type View =
   | { name: "decks" }
   | { name: "cards"; deck: Deck }
-  | { name: "study"; deck: Deck };
+  | { name: "study"; deck: Deck; from: "decks" | "cards" };
 
 function App() {
   const [view, setView] = useState<View>({ name: "decks" });
@@ -25,13 +25,23 @@ function App() {
           <CardsPage
             deck={view.deck}
             onBack={() => setView({ name: "decks" })}
-            onStudy={() => setView({ name: "study", deck: view.deck })}
+            onStudy={() => setView({ name: "study", deck: view.deck, from: "cards" })}
           />
         )}
         {view.name === "study" && (
-          <StudyPage deck={view.deck} onBack={() => setView({ name: "cards", deck: view.deck })} />
+          <StudyPage
+            deck={view.deck}
+            onBack={() =>
+              setView(view.from === "cards" ? { name: "cards", deck: view.deck } : { name: "decks" })
+            }
+          />
         )}
-        {view.name === "decks" && <DecksPage onOpenDeck={(deck) => setView({ name: "cards", deck })} />}
+        {view.name === "decks" && (
+          <DecksPage
+            onStudyDeck={(deck) => setView({ name: "study", deck, from: "decks" })}
+            onBrowseDeck={(deck) => setView({ name: "cards", deck })}
+          />
+        )}
       </div>
     </div>
   );
