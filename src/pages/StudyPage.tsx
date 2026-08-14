@@ -70,8 +70,10 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
               {item.full.subtitle && (
                 <div className="text-muted-foreground">{item.full.subtitle}</div>
               )}
-              {item.full.body && <p>{item.full.body}</p>}
-              {item.full.foot && <p className="text-muted-foreground">{item.full.foot}</p>}
+              {item.full.body && <p className="whitespace-pre-line">{item.full.body}</p>}
+              {item.full.foot && (
+                <p className="whitespace-pre-line text-muted-foreground">{item.full.foot}</p>
+              )}
             </CardContent>
           )}
         </UiCard>

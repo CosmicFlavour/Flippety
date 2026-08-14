@@ -141,4 +141,31 @@ describe("StudyPage", () => {
 
     expect(await screen.findByText("1 / 2")).toBeInTheDocument();
   });
+
+  it("preserves line breaks in the body and foot text", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.study.dueQueue).mockResolvedValue([
+      item({
+        full: {
+          title: "狗",
+          subtitle: "gǒu",
+          body: "Domestic dog.\nCommon household pet.",
+          foot: "这是我的狗。\n我很喜欢它。",
+        },
+      }),
+    ]);
+    renderStudyPage();
+    await screen.findByText("dog");
+
+    await user.click(screen.getByRole("button", { name: "Reveal" }));
+
+    const body = screen.getByText("Domestic dog.", { exact: false });
+    expect(body).toHaveClass("whitespace-pre-line");
+    expect(body).toHaveTextContent("Domestic dog.\nCommon household pet.", {
+      normalizeWhitespace: false,
+    });
+    const foot = screen.getByText("这是我的狗。", { exact: false });
+    expect(foot).toHaveClass("whitespace-pre-line");
+    expect(foot).toHaveTextContent("这是我的狗。\n我很喜欢它。", { normalizeWhitespace: false });
+  });
 });
