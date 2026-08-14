@@ -51,11 +51,11 @@ function mockDueItems(items: DueItem[]) {
   );
 }
 
-function renderStudyPage(onBack = vi.fn()) {
+function renderStudyPage(onBack = vi.fn(), deck: Deck = DECK) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
-      <StudyPage deck={DECK} onBack={onBack} />
+      <StudyPage deck={deck} onBack={onBack} />
     </QueryClientProvider>,
   );
 }
@@ -213,6 +213,38 @@ describe("StudyPage", () => {
 
     expect(await screen.findByText("bonus card")).toBeInTheDocument();
     expect(screen.queryByText("Nothing due right now. Nice work.")).not.toBeInTheDocument();
+  });
+
+  it("offers a bonus batch sized to the deck's daily cap, not the whole backlog", async () => {
+    const user = userEvent.setup();
+    const cappedDeck: Deck = { ...DECK, new_cards_per_day: 2 };
+    mockDueItems([]);
+    const bonusItems = [
+      item({ card_id: "bonus-1", prompt: "bonus 1" }),
+      item({ card_id: "bonus-2", prompt: "bonus 2" }),
+      item({ card_id: "bonus-3", prompt: "bonus 3" }),
+    ];
+    vi.mocked(api.study.bonusNewCards).mockResolvedValue(bonusItems.map(refOf));
+    vi.mocked(api.study.queueCards).mockImplementation(async (refs: QueueRef[]) =>
+      refs.map((ref) => bonusItems.find((i) => i.card_id === ref.card_id)!),
+    );
+    vi.mocked(api.study.submitReview).mockResolvedValue(undefined);
+    renderStudyPage(vi.fn(), cappedDeck);
+    await screen.findByText("Study 2 more new cards today");
+
+    await user.click(screen.getByText("Study 2 more new cards today"));
+
+    // Only the first 2 (the deck's cap) should be in the queue, not all 3.
+    expect(await screen.findByText("bonus 1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reveal" }));
+    await user.click(screen.getByRole("button", { name: "Good" }));
+    expect(await screen.findByText("bonus 2")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reveal" }));
+    await user.click(screen.getByRole("button", { name: "Good" }));
+
+    // The 3rd card is offered as a further (smaller) batch, not shown automatically.
+    expect(await screen.findByText("Study 1 more new card today")).toBeInTheDocument();
+    expect(screen.queryByText("bonus 3")).not.toBeInTheDocument();
   });
 
   it("fetches fresh data on a later visit instead of reusing a stale snapshot", async () => {

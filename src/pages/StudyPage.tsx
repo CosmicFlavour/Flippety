@@ -18,7 +18,10 @@ const AHEAD_HOURS = 24;
 export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) {
   const [index, setIndex] = useState(0);
   const [revealed, setRevealed] = useState(false);
-  const [bonusNewActivated, setBonusNewActivated] = useState(false);
+  // How many extra cap-sized batches of new cards the user has opted into —
+  // 0 means none yet. Each click reveals one more batch rather than the
+  // entire remaining backlog at once.
+  const [bonusNewBatchesRequested, setBonusNewBatchesRequested] = useState(0);
   const [aheadActivated, setAheadActivated] = useState(false);
 
   // Fetched fresh on every visit to this page (so completing a session and
@@ -41,13 +44,13 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
 
   // These double as a "peek" (to size the end-of-session buttons) and, once
   // the user opts in, the actual bonus data source — enabling the query
-  // doesn't commit to using it until `*Activated` flips.
+  // doesn't commit to using it until `*Activated`/`*BatchesRequested` flips.
   const mayBeExhausted = manifestQuery.isSuccess && index >= mainRefs.length;
 
   const bonusNewQuery = useQuery({
     queryKey: ["due", deck.id, "bonusNew"],
     queryFn: () => api.study.bonusNewCards(deck.id),
-    enabled: mayBeExhausted || bonusNewActivated,
+    enabled: mayBeExhausted || bonusNewBatchesRequested > 0,
     refetchOnWindowFocus: false,
   });
   // The main queue's new-card block is a guaranteed prefix of this uncapped
@@ -57,6 +60,15 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     () => (bonusNewQuery.data ?? []).slice(mainNewCount),
     [bonusNewQuery.data, mainNewCount],
   );
+  // Each "more new cards" click pulls one more batch the size of the deck's
+  // own daily cap, rather than the entire remaining backlog at once — a
+  // deck capped at 20/day should still only offer 20 more at a time. With no
+  // cap set, there's nothing left in `bonusNewRefs` anyway (the main queue
+  // already pulled every new card), so the fallback is moot.
+  const bonusBatchSize = deck.new_cards_per_day ?? bonusNewRefs.length;
+  const bonusNewVisibleCount = Math.min(bonusNewBatchesRequested * bonusBatchSize, bonusNewRefs.length);
+  const bonusNewVisibleRefs = bonusNewRefs.slice(0, bonusNewVisibleCount);
+  const nextBonusBatchSize = Math.min(bonusBatchSize, bonusNewRefs.length - bonusNewVisibleCount);
 
   const aheadQuery = useQuery({
     queryKey: ["due", deck.id, "ahead", AHEAD_HOURS],
@@ -69,10 +81,10 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
   const allRefs = useMemo(
     () => [
       ...mainRefs,
-      ...(bonusNewActivated ? bonusNewRefs : []),
+      ...(bonusNewBatchesRequested > 0 ? bonusNewVisibleRefs : []),
       ...(aheadActivated ? aheadRefs : []),
     ],
-    [mainRefs, bonusNewActivated, bonusNewRefs, aheadActivated, aheadRefs],
+    [mainRefs, bonusNewBatchesRequested, bonusNewVisibleRefs, aheadActivated, aheadRefs],
   );
 
   const neededBatches = Math.min(
@@ -132,7 +144,6 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
 
   const item = hydrated[index];
   const sessionExhausted = index >= allRefs.length && !hydrating;
-  const bonusNewRemaining = bonusNewRefs.length;
   const aheadRemaining = aheadRefs.length;
 
   return (
@@ -142,9 +153,9 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
       {sessionExhausted && (
         <div className="flex flex-col gap-3">
           <p className="text-muted-foreground">Nothing due right now. Nice work.</p>
-          {bonusNewRemaining > 0 && !bonusNewActivated && (
-            <Button variant="outline" onClick={() => setBonusNewActivated(true)}>
-              Study {bonusNewRemaining} more new card{bonusNewRemaining === 1 ? "" : "s"} today
+          {nextBonusBatchSize > 0 && (
+            <Button variant="outline" onClick={() => setBonusNewBatchesRequested((n) => n + 1)}>
+              Study {nextBonusBatchSize} more new card{nextBonusBatchSize === 1 ? "" : "s"} today
             </Button>
           )}
           {aheadRemaining > 0 && !aheadActivated && (
