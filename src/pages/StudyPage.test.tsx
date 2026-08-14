@@ -4,12 +4,15 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StudyPage } from "./StudyPage";
 import { api } from "@/lib/api";
-import type { Deck, DueItem } from "@/types/models";
+import type { Deck, DueItem, QueueRef } from "@/types/models";
 
 vi.mock("@/lib/api", () => ({
   api: {
     study: {
       dueQueue: vi.fn(),
+      bonusNewCards: vi.fn(),
+      aheadReviews: vi.fn(),
+      queueCards: vi.fn(),
       submitReview: vi.fn(),
     },
   },
@@ -34,6 +37,20 @@ function item(overrides: Partial<DueItem> = {}): DueItem {
   };
 }
 
+function refOf(due: DueItem): QueueRef {
+  return { card_id: due.card_id, direction: due.direction };
+}
+
+/** Wires dueQueue + queueCards so the given items come back as the main due-review queue. */
+function mockDueItems(items: DueItem[]) {
+  vi.mocked(api.study.dueQueue).mockResolvedValue({ due: items.map(refOf), new: [] });
+  vi.mocked(api.study.queueCards).mockImplementation(async (refs: QueueRef[]) =>
+    refs.map(
+      (ref) => items.find((i) => i.card_id === ref.card_id && i.direction === ref.direction)!,
+    ),
+  );
+}
+
 function renderStudyPage(onBack = vi.fn()) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -46,18 +63,21 @@ function renderStudyPage(onBack = vi.fn()) {
 describe("StudyPage", () => {
   beforeEach(() => {
     vi.mocked(api.study.dueQueue).mockReset();
+    vi.mocked(api.study.bonusNewCards).mockReset().mockResolvedValue([]);
+    vi.mocked(api.study.aheadReviews).mockReset().mockResolvedValue([]);
+    vi.mocked(api.study.queueCards).mockReset();
     vi.mocked(api.study.submitReview).mockReset();
   });
 
   it("shows an empty state when nothing is due", async () => {
-    vi.mocked(api.study.dueQueue).mockResolvedValue([]);
+    mockDueItems([]);
     renderStudyPage();
 
     expect(await screen.findByText("Nothing due right now. Nice work.")).toBeInTheDocument();
   });
 
   it("shows only the prompt, never the solution, before reveal", async () => {
-    vi.mocked(api.study.dueQueue).mockResolvedValue([item()]);
+    mockDueItems([item()]);
     renderStudyPage();
 
     expect(await screen.findByText("dog")).toBeInTheDocument();
@@ -68,7 +88,7 @@ describe("StudyPage", () => {
 
   it("reveals the full solution and the rating buttons after Reveal is clicked", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.study.dueQueue).mockResolvedValue([item()]);
+    mockDueItems([item()]);
     renderStudyPage();
     await screen.findByText("dog");
 
@@ -86,9 +106,7 @@ describe("StudyPage", () => {
 
   it("submits the rating with the card's id and direction", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.study.dueQueue).mockResolvedValue([
-      item({ card_id: "card-42", direction: "2->1" }),
-    ]);
+    mockDueItems([item({ card_id: "card-42", direction: "2->1" })]);
     vi.mocked(api.study.submitReview).mockResolvedValue(undefined);
     renderStudyPage();
     await screen.findByText("dog");
@@ -105,7 +123,7 @@ describe("StudyPage", () => {
 
   it("advances to the next card and hides the solution again after rating", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.study.dueQueue).mockResolvedValue([
+    mockDueItems([
       item({ card_id: "card-1", prompt: "dog" }),
       item({ card_id: "card-2", prompt: "cat", full: { title: "猫", subtitle: "", body: "", foot: "" } }),
     ]);
@@ -122,7 +140,7 @@ describe("StudyPage", () => {
 
   it("shows the empty state once the last card has been rated", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.study.dueQueue).mockResolvedValue([item()]);
+    mockDueItems([item()]);
     vi.mocked(api.study.submitReview).mockResolvedValue(undefined);
     renderStudyPage();
     await screen.findByText("dog");
@@ -136,7 +154,7 @@ describe("StudyPage", () => {
   });
 
   it("shows a running progress count", async () => {
-    vi.mocked(api.study.dueQueue).mockResolvedValue([item(), item({ card_id: "card-2" })]);
+    mockDueItems([item(), item({ card_id: "card-2" })]);
     renderStudyPage();
 
     expect(await screen.findByText("1 / 2")).toBeInTheDocument();
@@ -144,7 +162,7 @@ describe("StudyPage", () => {
 
   it("preserves line breaks in the body and foot text", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.study.dueQueue).mockResolvedValue([
+    mockDueItems([
       item({
         full: {
           title: "狗",
@@ -167,5 +185,33 @@ describe("StudyPage", () => {
     const foot = screen.getByText("这是我的狗。", { exact: false });
     expect(foot).toHaveClass("whitespace-pre-line");
     expect(foot).toHaveTextContent("这是我的狗。\n我很喜欢它。", { normalizeWhitespace: false });
+  });
+
+  it("offers more new cards and studying ahead once the session is exhausted", async () => {
+    mockDueItems([]);
+    vi.mocked(api.study.bonusNewCards).mockResolvedValue([
+      { card_id: "bonus-1", direction: "1->2" },
+      { card_id: "bonus-2", direction: "1->2" },
+    ]);
+    vi.mocked(api.study.aheadReviews).mockResolvedValue([{ card_id: "ahead-1", direction: "1->2" }]);
+    renderStudyPage();
+
+    expect(await screen.findByText("Study 2 more new cards today")).toBeInTheDocument();
+    expect(await screen.findByText("Study 1 card early (next 24h)")).toBeInTheDocument();
+  });
+
+  it("resumes studying with bonus new cards once that option is chosen", async () => {
+    const user = userEvent.setup();
+    mockDueItems([]);
+    const bonusItem = item({ card_id: "bonus-1", prompt: "bonus card" });
+    vi.mocked(api.study.bonusNewCards).mockResolvedValue([refOf(bonusItem)]);
+    vi.mocked(api.study.queueCards).mockResolvedValue([bonusItem]);
+    renderStudyPage();
+    await screen.findByText("Study 1 more new card today");
+
+    await user.click(screen.getByText("Study 1 more new card today"));
+
+    expect(await screen.findByText("bonus card")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing due right now. Nice work.")).not.toBeInTheDocument();
   });
 });

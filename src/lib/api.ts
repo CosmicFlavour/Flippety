@@ -7,6 +7,8 @@ import type {
   ImportMode,
   NewCard,
   NewDeck,
+  QueueManifest,
+  QueueRef,
   SubmitReviewInput,
   UpdateCard,
   UpdateDeck,
@@ -40,8 +42,11 @@ export const api = {
     resetProgress: (id: string) => invoke<void>("reset_card_progress", { id }),
   },
   study: {
-    dueQueue: (deckId: string | null, limit: number) =>
-      invoke<DueItem[]>("get_due_queue", { deckId, limit }),
+    dueQueue: (deckId: string | null) => invoke<QueueManifest>("get_due_queue", { deckId }),
+    bonusNewCards: (deckId: string) => invoke<QueueRef[]>("get_bonus_new_cards", { deckId }),
+    aheadReviews: (deckId: string, aheadHours: number) =>
+      invoke<QueueRef[]>("get_ahead_reviews", { deckId, aheadHours }),
+    queueCards: (refs: QueueRef[]) => invoke<DueItem[]>("get_queue_cards", { refs }),
     submitReview: (input: SubmitReviewInput) => invoke<void>("submit_review", { input }),
   },
   importExport: {
