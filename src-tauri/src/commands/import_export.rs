@@ -86,10 +86,17 @@ pub enum ImportMode {
     Merge { deck_id: String },
 }
 
-/// Imports a deck from `raw` JSON. Cards whose `id` already exists (only
-/// possible in Merge mode, re-importing a deck you already have) get their
-/// content updated in place, and any review progress on unchanged directions
-/// is left untouched. New directions on an existing card get fresh FSRS state.
+/// Imports a deck from `raw` JSON. Cards whose `id` already exists *in the
+/// target deck* (only possible in Merge mode, re-importing a deck you
+/// already have) get their content updated in place, and any review
+/// progress on unchanged directions is left untouched. New directions on an
+/// existing card get fresh FSRS state.
+///
+/// An `id` that collides with a card in a *different* deck is never adopted
+/// or overwritten — e.g. merging a stale copy of a deck's export into the
+/// wrong target, or re-importing a file that was already imported elsewhere,
+/// must not silently move someone else's card. Such a card is inserted as a
+/// new card with a freshly generated id instead.
 ///
 /// Runs as a single transaction so a mid-import failure (bad row, I/O error,
 /// crash) leaves the database exactly as it was, never a half-imported deck.
@@ -134,17 +141,25 @@ fn import_deck_json(conn: &mut Connection, raw: &str, mode: ImportMode) -> AppRe
     };
 
     for card_export in parsed.cards {
-        let existing = match &card_export.id {
+        let by_id = match &card_export.id {
             Some(id) => db::cards::get(&tx, id)?,
             None => None,
         };
 
-        let card = Card {
-            id: existing
-                .as_ref()
-                .map(|c| c.id.clone())
-                .or(card_export.id)
+        let id = match &by_id {
+            Some(card) if card.deck_id == deck.id => card.id.clone(),
+            // Collides with a card in another deck — that card is left
+            // untouched, so this one gets a fresh id instead of hijacking it.
+            Some(_) => Uuid::new_v4().to_string(),
+            None => card_export
+                .id
+                .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        };
+        let existing = by_id.filter(|c| c.deck_id == deck.id);
+
+        let card = Card {
+            id,
             deck_id: deck.id.clone(),
             face_1: card_export.face_1,
             face_2: card_export.face_2,
@@ -474,6 +489,115 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn import_deck_merge_does_not_hijack_a_colliding_id_from_a_different_deck() {
+        let mut conn = db::test_connection();
+        let other_deck = new_deck(&conn, "Other deck");
+        let target_deck = new_deck(&conn, "Target deck");
+        let foreign_card = Card {
+            id: Uuid::new_v4().to_string(),
+            deck_id: other_deck.id.clone(),
+            face_1: "cat".into(),
+            face_2: "猫".into(),
+            full: CardFull {
+                title: "猫".into(),
+                subtitle: String::new(),
+                body: String::new(),
+                foot: String::new(),
+            },
+            tags: vec![],
+            directions: Direction::all().to_vec(),
+            level: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db::cards::insert(&conn, &foreign_card).unwrap();
+        let fsrs_state = crate::srs::new_card_state(Utc::now());
+        db::review_state::seed(
+            &conn,
+            &foreign_card.id,
+            Direction::FaceOneToTwo,
+            &fsrs_state,
+        )
+        .unwrap();
+        let mut reviewed = db::review_state::get(&conn, &foreign_card.id, Direction::FaceOneToTwo)
+            .unwrap()
+            .unwrap();
+        reviewed.reps = 5;
+        db::review_state::upsert(&conn, &foreign_card.id, Direction::FaceOneToTwo, &reviewed)
+            .unwrap();
+
+        // An import file whose card id happens to match `foreign_card`, merged
+        // into a different deck than the one that card actually belongs to.
+        let json = sample_export_json("Ignored on merge", Some(&foreign_card.id));
+
+        let result = import_deck_json(
+            &mut conn,
+            &json,
+            ImportMode::Merge {
+                deck_id: target_deck.id.clone(),
+            },
+        )
+        .unwrap();
+
+        // The foreign card is untouched: still in its original deck, with its
+        // original content and review progress intact.
+        let reloaded_foreign = db::cards::get(&conn, &foreign_card.id).unwrap().unwrap();
+        assert_eq!(reloaded_foreign.deck_id, other_deck.id);
+        assert_eq!(reloaded_foreign.face_1, "cat");
+        let foreign_progress =
+            db::review_state::get(&conn, &foreign_card.id, Direction::FaceOneToTwo)
+                .unwrap()
+                .unwrap();
+        assert_eq!(foreign_progress.reps, 5);
+
+        // The imported card lands in the target deck under a new id instead.
+        let target_cards = db::cards::list_by_deck(&conn, &result.id).unwrap();
+        assert_eq!(target_cards.len(), 1);
+        assert_ne!(target_cards[0].id, foreign_card.id);
+        assert_eq!(target_cards[0].face_1, "dog");
+    }
+
+    #[test]
+    fn import_deck_new_does_not_hijack_a_colliding_id_from_an_existing_deck() {
+        let mut conn = db::test_connection();
+        let existing_deck = new_deck(&conn, "Existing deck");
+        let existing_card = Card {
+            id: Uuid::new_v4().to_string(),
+            deck_id: existing_deck.id.clone(),
+            face_1: "cat".into(),
+            face_2: "猫".into(),
+            full: CardFull {
+                title: "猫".into(),
+                subtitle: String::new(),
+                body: String::new(),
+                foot: String::new(),
+            },
+            tags: vec![],
+            directions: Direction::all().to_vec(),
+            level: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db::cards::insert(&conn, &existing_card).unwrap();
+
+        // Importing "as a new deck" with a file whose card id coincidentally
+        // matches a card that already exists in a totally different deck.
+        let json = sample_export_json("Brand new deck", Some(&existing_card.id));
+
+        let result = import_deck_json(&mut conn, &json, ImportMode::New).unwrap();
+
+        assert_ne!(result.id, existing_deck.id);
+        let reloaded_existing = db::cards::get(&conn, &existing_card.id).unwrap().unwrap();
+        assert_eq!(reloaded_existing.deck_id, existing_deck.id);
+        assert_eq!(reloaded_existing.face_1, "cat");
+
+        let new_deck_cards = db::cards::list_by_deck(&conn, &result.id).unwrap();
+        assert_eq!(new_deck_cards.len(), 1);
+        assert_ne!(new_deck_cards[0].id, existing_card.id);
+        assert_eq!(new_deck_cards[0].face_1, "dog");
     }
 
     #[test]
