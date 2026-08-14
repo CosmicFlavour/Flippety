@@ -87,12 +87,12 @@ export function CardsPage({
       </div>
 
       {cardsQuery.isLoading && <p className="text-muted-foreground">Loading…</p>}
-      {cardsQuery.data?.length === 0 && (
+      {cardsQuery.data?.items.length === 0 && (
         <p className="text-muted-foreground">No cards yet. Add one to get started.</p>
       )}
 
       <div className="flex flex-col gap-2">
-        {cardsQuery.data?.map((card) => (
+        {cardsQuery.data?.items.map((card) => (
           <UiCard key={card.id}>
             <CardHeader>
               <CardTitle>

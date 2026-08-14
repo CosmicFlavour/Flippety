@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Card,
+  CardPage,
   Deck,
   DueItem,
   ImportMode,
@@ -21,7 +22,17 @@ export const api = {
     delete: (id: string) => invoke<void>("delete_deck", { id }),
   },
   cards: {
-    listByDeck: (deckId: string) => invoke<Card[]>("list_cards", { deckId }),
+    listByDeck: (
+      deckId: string,
+      options?: { search?: string; tags?: string[]; limit?: number; offset?: number },
+    ) =>
+      invoke<CardPage>("list_cards", {
+        deckId,
+        search: options?.search,
+        tags: options?.tags,
+        limit: options?.limit,
+        offset: options?.offset,
+      }),
     create: (input: NewCard) => invoke<Card>("create_card", { input }),
     update: (input: UpdateCard) => invoke<Card>("update_card", { input }),
     delete: (id: string) => invoke<void>("delete_card", { id }),

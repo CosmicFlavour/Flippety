@@ -34,6 +34,12 @@ export interface Card {
   updated_at: string;
 }
 
+export interface CardPage {
+  items: Card[];
+  /** Total rows matching the filter, ignoring limit/offset. */
+  total: number;
+}
+
 export interface NewDeck {
   name: string;
   description?: string | null;

@@ -1,5 +1,6 @@
 use super::AppState;
 use crate::db;
+use crate::db::cards::{CardFilter, CardPage};
 use crate::error::{AppError, AppResult};
 use crate::models::card::{Card, NewCard, UpdateCard};
 use chrono::Utc;
@@ -76,10 +77,30 @@ fn delete_card_inner(conn: &Connection, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// `limit`/`offset` default to "everything" when omitted, so existing
+/// callers that only pass `deck_id` keep working while the browse UI grows
+/// pagination on top of this.
 #[tauri::command]
-pub fn list_cards(state: State<AppState>, deck_id: String) -> AppResult<Vec<Card>> {
+pub fn list_cards(
+    state: State<AppState>,
+    deck_id: String,
+    search: Option<String>,
+    tags: Option<Vec<String>>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> AppResult<CardPage> {
     let conn = state.conn();
-    db::cards::list_by_deck(&conn, &deck_id)
+    let filter = CardFilter {
+        search,
+        tags: tags.unwrap_or_default(),
+    };
+    db::cards::browse(
+        &conn,
+        &deck_id,
+        &filter,
+        limit.unwrap_or(i64::MAX),
+        offset.unwrap_or(0),
+    )
 }
 
 #[tauri::command]
