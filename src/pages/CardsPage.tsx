@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Pencil, Search, Trash2, X } from "lucide-react";
+import { ArrowLeft, Pencil, Search, Trash2, X } from "lucide-react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "@/lib/api";
@@ -129,9 +129,9 @@ export function CardsPage({
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-4 p-6">
       <div className="flex items-center justify-between">
-        <div>
-          <Button variant="ghost" size="sm" onClick={onBack}>
-            ← Decks
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="icon-sm" aria-label="Back to decks" onClick={onBack}>
+            <ArrowLeft className="size-4" />
           </Button>
           <h1 className="text-xl font-semibold">{deck.name}</h1>
         </div>

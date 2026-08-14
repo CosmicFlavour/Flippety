@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type { Deck, Rating } from "@/types/models";
@@ -31,9 +32,19 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     },
   });
 
+  const header = (
+    <div className="flex items-center gap-2">
+      <Button variant="ghost" size="icon-sm" aria-label="Back" onClick={onBack}>
+        <ArrowLeft className="size-4" />
+      </Button>
+      <h1 className="text-xl font-semibold">{deck.name}</h1>
+    </div>
+  );
+
   if (queueQuery.isLoading) {
     return (
-      <div className="mx-auto max-w-xl p-6">
+      <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
+        {header}
         <p className="text-muted-foreground">Loading…</p>
       </div>
     );
@@ -44,11 +55,7 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
 
   return (
     <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
-      <div>
-        <Button variant="ghost" size="sm" onClick={onBack}>
-          ← {deck.name}
-        </Button>
-      </div>
+      {header}
 
       {!item && <p className="text-muted-foreground">Nothing due right now. Nice work.</p>}
 
