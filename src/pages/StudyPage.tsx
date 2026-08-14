@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -19,26 +19,40 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
   const [queue, setQueue] = useState<DueItem[]>([]);
   const [index, setIndex] = useState(0);
   const [revealed, setRevealed] = useState(false);
-  // True once a fetch has come back empty — stops auto-prefetching until
-  // either more becomes due or the user explicitly asks for more new cards.
+  // True once a fetch has come back shorter than requested — stops
+  // auto-prefetching until either more becomes due or the user asks for more.
   const [noMoreAvailable, setNoMoreAvailable] = useState(false);
   const [bonusNewAvailable, setBonusNewAvailable] = useState(0);
-  // Guards against React StrictMode's double-invoked effects firing two
-  // concurrent fetches for the same batch.
-  const fetchingRef = useRef(false);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  // Guards against overlapping fetches — the auto-refill effect firing again
+  // before a previous fetch (auto or manual) has settled.
+  const inFlightRef = useRef(false);
 
-  const fetchBatch = useMutation({
-    mutationFn: (bypassNewCardCap: boolean) =>
-      api.study.studyBatch(deck.id, BATCH_SIZE, bypassNewCardCap),
-    onSuccess: (batch) => {
-      setBonusNewAvailable(batch.bonus_new_available);
-      setQueue((q) => [...q, ...batch.items]);
-      // A batch shorter than requested means the backend already exhausted
-      // everything due/introducible right now — no point asking again until
-      // more becomes due or the user requests bonus cards.
-      setNoMoreAvailable(batch.items.length < BATCH_SIZE);
+  const loadMore = useCallback(
+    async (bypassNewCardCap: boolean) => {
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      setLoading(true);
+      setLoadError(false);
+      try {
+        const batch = await api.study.studyBatch(deck.id, BATCH_SIZE, bypassNewCardCap);
+        setBonusNewAvailable(batch.bonus_new_available);
+        setQueue((q) => [...q, ...batch.items]);
+        // A batch shorter than requested means the backend already exhausted
+        // everything due/introducible right now — no point asking again
+        // until more becomes due or the user asks for bonus cards.
+        setNoMoreAvailable(batch.items.length < BATCH_SIZE);
+      } catch {
+        setLoadError(true);
+      } finally {
+        // Always runs, success or failure, so "loading" can never get stuck.
+        setLoading(false);
+        inFlightRef.current = false;
+      }
     },
-  });
+    [deck.id],
+  );
 
   // Keeps the buffer topped up as the user studies through it. Not an
   // infinite-scroll "load more" — this is what makes the queue feel
@@ -47,15 +61,8 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
   useEffect(() => {
     if (noMoreAvailable) return;
     if (queue.length - index > PREFETCH_THRESHOLD) return;
-    if (fetchingRef.current) return;
-    fetchingRef.current = true;
-    fetchBatch.mutate(false, {
-      onSettled: () => {
-        fetchingRef.current = false;
-      },
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, queue.length, noMoreAvailable]);
+    loadMore(false);
+  }, [index, queue.length, noMoreAvailable, loadMore]);
 
   const submitReview = useMutation({
     mutationFn: (rating: Rating) => {
@@ -81,7 +88,7 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     </div>
   );
 
-  const initialLoading = queue.length === 0 && !noMoreAvailable;
+  const initialLoading = queue.length === 0 && !noMoreAvailable && !loadError;
   if (initialLoading) {
     return (
       <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
@@ -92,9 +99,8 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
   }
 
   const item = queue[index];
-  const exhausted = !item && noMoreAvailable;
-  const waitingForNextBatch = !item && !noMoreAvailable;
-  const bonusBatchSize = Math.min(bonusNewAvailable, BATCH_SIZE);
+  const exhausted = !item && (noMoreAvailable || loadError);
+  const waitingForNextBatch = !item && !noMoreAvailable && !loadError;
 
   return (
     <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
@@ -103,17 +109,19 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
       {exhausted && (
         <div className="flex flex-col gap-3">
           <p className="text-muted-foreground">
-            {bonusNewAvailable > 0
-              ? "Daily limit reached — nothing to review right now."
-              : "Nothing due right now. Nice work."}
+            {loadError
+              ? "Couldn't load more cards."
+              : bonusNewAvailable > 0
+                ? "Daily limit reached — nothing to review right now."
+                : "Nothing due right now. Nice work."}
           </p>
-          {bonusNewAvailable > 0 && (
+          {(loadError || bonusNewAvailable > 0) && (
             <Button
               variant="outline"
-              disabled={fetchBatch.isPending}
-              onClick={() => fetchBatch.mutate(true)}
+              disabled={loading}
+              onClick={() => loadMore(loadError ? bonusNewAvailable > 0 : true)}
             >
-              Pull {bonusBatchSize} more new card{bonusBatchSize === 1 ? "" : "s"}
+              {loadError ? "Try again" : "Continue"}
             </Button>
           )}
         </div>

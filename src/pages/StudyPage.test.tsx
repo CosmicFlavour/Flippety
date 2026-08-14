@@ -191,25 +191,25 @@ describe("StudyPage", () => {
     expect(foot).toHaveTextContent("这是我的狗。\n我很喜欢它。", { normalizeWhitespace: false });
   });
 
-  it("offers to pull more new cards once the daily cap is reached", async () => {
+  it("offers to continue once the daily cap is reached", async () => {
     mockStudyBatch([], 3);
     renderStudyPage();
 
     expect(
       await screen.findByText("Daily limit reached — nothing to review right now."),
     ).toBeInTheDocument();
-    expect(screen.getByText("Pull 3 more new cards")).toBeInTheDocument();
+    expect(screen.getByText("Continue")).toBeInTheDocument();
   });
 
-  it("does not offer a bonus button when there truly is nothing left", async () => {
+  it("does not offer a continue button when there truly is nothing left", async () => {
     mockStudyBatch([], 0);
     renderStudyPage();
 
     expect(await screen.findByText("Nothing due right now. Nice work.")).toBeInTheDocument();
-    expect(screen.queryByText(/Pull \d+ more new card/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Continue")).not.toBeInTheDocument();
   });
 
-  it("resumes studying with bonus new cards once 'pull more' is chosen, bypassing the cap for exactly that batch", async () => {
+  it("resumes studying with bonus new cards once Continue is chosen, bypassing the cap for exactly that batch", async () => {
     const user = userEvent.setup();
     const bonusItem = item({ card_id: "bonus-1", prompt: "bonus card" });
     vi.mocked(api.study.studyBatch).mockImplementation(async (_deckId, _limit, bypass) => {
@@ -217,13 +217,67 @@ describe("StudyPage", () => {
       return { items: [], bonus_new_available: 1 };
     });
     renderStudyPage();
-    await screen.findByText("Pull 1 more new card");
+    await screen.findByText("Continue");
 
-    await user.click(screen.getByText("Pull 1 more new card"));
+    await user.click(screen.getByText("Continue"));
 
     expect(await screen.findByText("bonus card")).toBeInTheDocument();
     expect(screen.queryByText("Nothing due right now. Nice work.")).not.toBeInTheDocument();
     expect(api.study.studyBatch).toHaveBeenCalledWith(DECK.id, 10, true);
+  });
+
+  it("the Continue button stays clickable and independent of the background auto-refill", async () => {
+    const user = userEvent.setup();
+    const bonusItem = item({ card_id: "bonus-1", prompt: "bonus card" });
+    vi.mocked(api.study.studyBatch).mockImplementation(async (_deckId, _limit, bypass) => {
+      if (bypass) return { items: [bonusItem], bonus_new_available: 0 };
+      return { items: [], bonus_new_available: 1 };
+    });
+    renderStudyPage();
+    const button = await screen.findByText("Continue");
+
+    expect(button.closest("button")).not.toBeDisabled();
+    await user.click(button);
+
+    expect(await screen.findByText("bonus card")).toBeInTheDocument();
+  });
+
+  it("shows an error message and a retry button if loading more cards fails, without getting stuck on Loading…", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.study.studyBatch).mockImplementation(async (_deckId, _limit, bypass) => {
+      if (bypass) throw new Error("network error");
+      return { items: [], bonus_new_available: 2 };
+    });
+    renderStudyPage();
+    await screen.findByText("Continue");
+
+    await user.click(screen.getByText("Continue"));
+
+    expect(await screen.findByText("Couldn't load more cards.")).toBeInTheDocument();
+    expect(screen.getByText("Try again")).toBeInTheDocument();
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+  });
+
+  it("retries with the same bypass mode after a failed continue", async () => {
+    const user = userEvent.setup();
+    const bonusItem = item({ card_id: "bonus-1", prompt: "bonus card" });
+    let bypassAttempts = 0;
+    vi.mocked(api.study.studyBatch).mockImplementation(async (_deckId, _limit, bypass) => {
+      if (bypass) {
+        bypassAttempts++;
+        if (bypassAttempts === 1) throw new Error("network error");
+        return { items: [bonusItem], bonus_new_available: 0 };
+      }
+      return { items: [], bonus_new_available: 1 };
+    });
+    renderStudyPage();
+    await screen.findByText("Continue");
+    await user.click(screen.getByText("Continue"));
+    await screen.findByText("Try again");
+
+    await user.click(screen.getByText("Try again"));
+
+    expect(await screen.findByText("bonus card")).toBeInTheDocument();
   });
 
   it("automatically fetches another batch as the buffer runs low", async () => {
