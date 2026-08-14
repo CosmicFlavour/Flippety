@@ -21,14 +21,15 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
   const [bonusNewActivated, setBonusNewActivated] = useState(false);
   const [aheadActivated, setAheadActivated] = useState(false);
 
-  // The manifest is fetched once and never refetched mid-session: it's just
-  // lightweight (card_id, direction) refs, and re-querying "what's due" as
-  // ratings are submitted would reshuffle the remaining items out from under
-  // an in-progress batch-by-batch hydration.
+  // Fetched fresh on every visit to this page (so completing a session and
+  // coming back later shows what's newly due, not a stale snapshot), but not
+  // refetched while the page stays mounted — it's just lightweight
+  // (card_id, direction) refs, and re-querying "what's due" as ratings are
+  // submitted would reshuffle the remaining items out from under an
+  // in-progress batch-by-batch hydration.
   const manifestQuery = useQuery({
     queryKey: ["due", deck.id, "manifest"],
     queryFn: () => api.study.dueQueue(deck.id),
-    staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
 
@@ -47,7 +48,6 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     queryKey: ["due", deck.id, "bonusNew"],
     queryFn: () => api.study.bonusNewCards(deck.id),
     enabled: mayBeExhausted || bonusNewActivated,
-    staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
   // The main queue's new-card block is a guaranteed prefix of this uncapped
@@ -62,7 +62,6 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     queryKey: ["due", deck.id, "ahead", AHEAD_HOURS],
     queryFn: () => api.study.aheadReviews(deck.id, AHEAD_HOURS),
     enabled: mayBeExhausted || aheadActivated,
-    staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
   const aheadRefs = aheadQuery.data ?? [];
@@ -82,9 +81,14 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
   );
   const batchIndices = Array.from({ length: Math.max(neededBatches, 0) }, (_, i) => i);
 
+  // Keyed by this visit's manifest fetch (not just the batch index) so a
+  // fresh visit — with a freshly-refetched manifest — hydrates fresh card
+  // content instead of reusing another visit's cached batches, which could
+  // now correspond to different refs.
+  const manifestVersion = manifestQuery.dataUpdatedAt;
   const batchQueries = useQueries({
     queries: batchIndices.map((i) => ({
-      queryKey: ["due", deck.id, "hydrate", i],
+      queryKey: ["due", deck.id, "hydrate", manifestVersion, i],
       queryFn: () => api.study.queueCards(allRefs.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE)),
       staleTime: Infinity,
       refetchOnWindowFocus: false,

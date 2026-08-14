@@ -214,4 +214,31 @@ describe("StudyPage", () => {
     expect(await screen.findByText("bonus card")).toBeInTheDocument();
     expect(screen.queryByText("Nothing due right now. Nice work.")).not.toBeInTheDocument();
   });
+
+  it("fetches fresh data on a later visit instead of reusing a stale snapshot", async () => {
+    // Regression test: the app keeps one QueryClient for its whole lifetime
+    // and mounts/unmounts StudyPage as you navigate to and from it, so a
+    // query cached indefinitely would show the same items forever.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    mockDueItems([item({ card_id: "card-1", prompt: "dog" })]);
+    const { unmount } = render(
+      <QueryClientProvider client={queryClient}>
+        <StudyPage deck={DECK} onBack={vi.fn()} />
+      </QueryClientProvider>,
+    );
+    await screen.findByText("dog");
+    unmount();
+
+    // Simulate having rated "dog" and a different card being due by the time
+    // the user comes back.
+    mockDueItems([item({ card_id: "card-2", prompt: "cat" })]);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <StudyPage deck={DECK} onBack={vi.fn()} />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("cat")).toBeInTheDocument();
+    expect(screen.queryByText("dog")).not.toBeInTheDocument();
+  });
 });
