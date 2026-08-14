@@ -1,117 +1,65 @@
-import { useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
-import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type { Deck, DueItem, Rating } from "@/types/models";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 
 const RATINGS: Rating[] = ["Again", "Hard", "Good", "Easy"];
-// How many (card_id, direction) refs to hydrate with full card content per
-// request — keeps a session with hundreds of due items from fetching every
-// card's text up front.
-const BATCH_SIZE = 30;
-// Start fetching the next batch this many items before the loaded ones run out.
-const PREFETCH_THRESHOLD = 5;
-const AHEAD_HOURS = 24;
+// How many items to pull per fetch. FSRS can make an item due again within
+// minutes (short-term learning steps), so there's no fixed "today's set" to
+// precompute — small batches keep what's on screen close to what's actually
+// due right now, without fetching after every single card.
+const BATCH_SIZE = 10;
+// Start fetching the next batch this many items before the buffer runs out.
+const PREFETCH_THRESHOLD = 3;
 
 export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) {
+  const [queue, setQueue] = useState<DueItem[]>([]);
   const [index, setIndex] = useState(0);
   const [revealed, setRevealed] = useState(false);
-  // How many extra cap-sized batches of new cards the user has opted into —
-  // 0 means none yet. Each click reveals one more batch rather than the
-  // entire remaining backlog at once.
-  const [bonusNewBatchesRequested, setBonusNewBatchesRequested] = useState(0);
-  const [aheadActivated, setAheadActivated] = useState(false);
+  // True once a fetch has come back empty — stops auto-prefetching until
+  // either more becomes due or the user explicitly asks for more new cards.
+  const [noMoreAvailable, setNoMoreAvailable] = useState(false);
+  const [bonusNewAvailable, setBonusNewAvailable] = useState(0);
+  // Guards against React StrictMode's double-invoked effects firing two
+  // concurrent fetches for the same batch.
+  const fetchingRef = useRef(false);
 
-  // Fetched fresh on every visit to this page (so completing a session and
-  // coming back later shows what's newly due, not a stale snapshot), but not
-  // refetched while the page stays mounted — it's just lightweight
-  // (card_id, direction) refs, and re-querying "what's due" as ratings are
-  // submitted would reshuffle the remaining items out from under an
-  // in-progress batch-by-batch hydration.
-  const manifestQuery = useQuery({
-    queryKey: ["due", deck.id, "manifest"],
-    queryFn: () => api.study.dueQueue(deck.id),
-    refetchOnWindowFocus: false,
+  const fetchBatch = useMutation({
+    mutationFn: (bypassNewCardCap: boolean) =>
+      api.study.studyBatch(deck.id, BATCH_SIZE, bypassNewCardCap),
+    onSuccess: (batch) => {
+      setBonusNewAvailable(batch.bonus_new_available);
+      setQueue((q) => [...q, ...batch.items]);
+      // A batch shorter than requested means the backend already exhausted
+      // everything due/introducible right now — no point asking again until
+      // more becomes due or the user requests bonus cards.
+      setNoMoreAvailable(batch.items.length < BATCH_SIZE);
+    },
   });
 
-  const mainRefs = useMemo(
-    () => (manifestQuery.data ? [...manifestQuery.data.due, ...manifestQuery.data.new] : []),
-    [manifestQuery.data],
-  );
-  const mainNewCount = manifestQuery.data?.new.length ?? 0;
-
-  // These double as a "peek" (to size the end-of-session buttons) and, once
-  // the user opts in, the actual bonus data source — enabling the query
-  // doesn't commit to using it until `*Activated`/`*BatchesRequested` flips.
-  const mayBeExhausted = manifestQuery.isSuccess && index >= mainRefs.length;
-
-  const bonusNewQuery = useQuery({
-    queryKey: ["due", deck.id, "bonusNew"],
-    queryFn: () => api.study.bonusNewCards(deck.id),
-    enabled: mayBeExhausted || bonusNewBatchesRequested > 0,
-    refetchOnWindowFocus: false,
-  });
-  // The main queue's new-card block is a guaranteed prefix of this uncapped
-  // list (same deterministic order, cap just ignored) — drop it so this is
-  // only the cards not already shown.
-  const bonusNewRefs = useMemo(
-    () => (bonusNewQuery.data ?? []).slice(mainNewCount),
-    [bonusNewQuery.data, mainNewCount],
-  );
-  // Each "more new cards" click pulls one more batch the size of the deck's
-  // own daily cap, rather than the entire remaining backlog at once — a
-  // deck capped at 20/day should still only offer 20 more at a time. With no
-  // cap set, there's nothing left in `bonusNewRefs` anyway (the main queue
-  // already pulled every new card), so the fallback is moot.
-  const bonusBatchSize = deck.new_cards_per_day ?? bonusNewRefs.length;
-  const bonusNewVisibleCount = Math.min(bonusNewBatchesRequested * bonusBatchSize, bonusNewRefs.length);
-  const bonusNewVisibleRefs = bonusNewRefs.slice(0, bonusNewVisibleCount);
-  const nextBonusBatchSize = Math.min(bonusBatchSize, bonusNewRefs.length - bonusNewVisibleCount);
-
-  const aheadQuery = useQuery({
-    queryKey: ["due", deck.id, "ahead", AHEAD_HOURS],
-    queryFn: () => api.study.aheadReviews(deck.id, AHEAD_HOURS),
-    enabled: mayBeExhausted || aheadActivated,
-    refetchOnWindowFocus: false,
-  });
-  const aheadRefs = aheadQuery.data ?? [];
-
-  const allRefs = useMemo(
-    () => [
-      ...mainRefs,
-      ...(bonusNewBatchesRequested > 0 ? bonusNewVisibleRefs : []),
-      ...(aheadActivated ? aheadRefs : []),
-    ],
-    [mainRefs, bonusNewBatchesRequested, bonusNewVisibleRefs, aheadActivated, aheadRefs],
-  );
-
-  const neededBatches = Math.min(
-    Math.ceil((index + PREFETCH_THRESHOLD + 1) / BATCH_SIZE),
-    Math.ceil(allRefs.length / BATCH_SIZE),
-  );
-  const batchIndices = Array.from({ length: Math.max(neededBatches, 0) }, (_, i) => i);
-
-  // Keyed by this visit's manifest fetch (not just the batch index) so a
-  // fresh visit — with a freshly-refetched manifest — hydrates fresh card
-  // content instead of reusing another visit's cached batches, which could
-  // now correspond to different refs.
-  const manifestVersion = manifestQuery.dataUpdatedAt;
-  const batchQueries = useQueries({
-    queries: batchIndices.map((i) => ({
-      queryKey: ["due", deck.id, "hydrate", manifestVersion, i],
-      queryFn: () => api.study.queueCards(allRefs.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE)),
-      staleTime: Infinity,
-      refetchOnWindowFocus: false,
-    })),
-  });
-  const hydrated: DueItem[] = batchQueries.flatMap((q) => q.data ?? []);
-  const hydrating = batchQueries.some((q) => q.isLoading || q.isFetching);
+  // Keeps the buffer topped up as the user studies through it. Not an
+  // infinite-scroll "load more" — this is what makes the queue feel
+  // never-ending: once nothing is due and today's new-card cap is reached,
+  // it simply stops until the user asks for more.
+  useEffect(() => {
+    if (noMoreAvailable) return;
+    if (queue.length - index > PREFETCH_THRESHOLD) return;
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
+    fetchBatch.mutate(false, {
+      onSettled: () => {
+        fetchingRef.current = false;
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, queue.length, noMoreAvailable]);
 
   const submitReview = useMutation({
     mutationFn: (rating: Rating) => {
-      const item = hydrated[index];
+      const item = queue[index];
       return api.study.submitReview({
         card_id: item.card_id,
         direction: item.direction,
@@ -133,7 +81,8 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     </div>
   );
 
-  if (manifestQuery.isLoading) {
+  const initialLoading = queue.length === 0 && !noMoreAvailable;
+  if (initialLoading) {
     return (
       <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
         {header}
@@ -142,31 +91,35 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     );
   }
 
-  const item = hydrated[index];
-  const sessionExhausted = index >= allRefs.length && !hydrating;
-  const aheadRemaining = aheadRefs.length;
+  const item = queue[index];
+  const exhausted = !item && noMoreAvailable;
+  const waitingForNextBatch = !item && !noMoreAvailable;
+  const bonusBatchSize = Math.min(bonusNewAvailable, BATCH_SIZE);
 
   return (
     <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
       {header}
 
-      {sessionExhausted && (
+      {exhausted && (
         <div className="flex flex-col gap-3">
-          <p className="text-muted-foreground">Nothing due right now. Nice work.</p>
-          {nextBonusBatchSize > 0 && (
-            <Button variant="outline" onClick={() => setBonusNewBatchesRequested((n) => n + 1)}>
-              Study {nextBonusBatchSize} more new card{nextBonusBatchSize === 1 ? "" : "s"} today
-            </Button>
-          )}
-          {aheadRemaining > 0 && !aheadActivated && (
-            <Button variant="outline" onClick={() => setAheadActivated(true)}>
-              Study {aheadRemaining} card{aheadRemaining === 1 ? "" : "s"} early (next 24h)
+          <p className="text-muted-foreground">
+            {bonusNewAvailable > 0
+              ? "Daily limit reached — nothing to review right now."
+              : "Nothing due right now. Nice work."}
+          </p>
+          {bonusNewAvailable > 0 && (
+            <Button
+              variant="outline"
+              disabled={fetchBatch.isPending}
+              onClick={() => fetchBatch.mutate(true)}
+            >
+              Pull {bonusBatchSize} more new card{bonusBatchSize === 1 ? "" : "s"}
             </Button>
           )}
         </div>
       )}
 
-      {!sessionExhausted && !item && <p className="text-muted-foreground">Loading…</p>}
+      {waitingForNextBatch && <p className="text-muted-foreground">Loading…</p>}
 
       {item && (
         <UiCard>
@@ -205,11 +158,7 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
         </div>
       )}
 
-      {allRefs.length > 0 && (
-        <p className="text-sm text-muted-foreground">
-          {Math.min(index + 1, allRefs.length)} / {allRefs.length}
-        </p>
-      )}
+      {index > 0 && <p className="text-sm text-muted-foreground">{index} studied this session</p>}
     </div>
   );
 }

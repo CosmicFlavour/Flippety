@@ -82,15 +82,10 @@ export interface DueItem {
   full: CardFull;
 }
 
-/** A lightweight (card_id, direction) reference into the queue, with no card content. */
-export interface QueueRef {
-  card_id: string;
-  direction: Direction;
-}
-
-export interface QueueManifest {
-  due: QueueRef[];
-  new: QueueRef[];
+export interface StudyBatch {
+  items: DueItem[];
+  /** New-card items available beyond today's cap, not included in `items`. */
+  bonus_new_available: number;
 }
 
 export interface SubmitReviewInput {

@@ -4,15 +4,12 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StudyPage } from "./StudyPage";
 import { api } from "@/lib/api";
-import type { Deck, DueItem, QueueRef } from "@/types/models";
+import type { Deck, DueItem } from "@/types/models";
 
 vi.mock("@/lib/api", () => ({
   api: {
     study: {
-      dueQueue: vi.fn(),
-      bonusNewCards: vi.fn(),
-      aheadReviews: vi.fn(),
-      queueCards: vi.fn(),
+      studyBatch: vi.fn(),
       submitReview: vi.fn(),
     },
   },
@@ -37,18 +34,12 @@ function item(overrides: Partial<DueItem> = {}): DueItem {
   };
 }
 
-function refOf(due: DueItem): QueueRef {
-  return { card_id: due.card_id, direction: due.direction };
-}
-
-/** Wires dueQueue + queueCards so the given items come back as the main due-review queue. */
-function mockDueItems(items: DueItem[]) {
-  vi.mocked(api.study.dueQueue).mockResolvedValue({ due: items.map(refOf), new: [] });
-  vi.mocked(api.study.queueCards).mockImplementation(async (refs: QueueRef[]) =>
-    refs.map(
-      (ref) => items.find((i) => i.card_id === ref.card_id && i.direction === ref.direction)!,
-    ),
-  );
+/** Wires studyBatch to always resolve with the given items/bonus count, regardless of args. */
+function mockStudyBatch(items: DueItem[], bonusNewAvailable = 0) {
+  vi.mocked(api.study.studyBatch).mockResolvedValue({
+    items,
+    bonus_new_available: bonusNewAvailable,
+  });
 }
 
 function renderStudyPage(onBack = vi.fn(), deck: Deck = DECK) {
@@ -62,22 +53,19 @@ function renderStudyPage(onBack = vi.fn(), deck: Deck = DECK) {
 
 describe("StudyPage", () => {
   beforeEach(() => {
-    vi.mocked(api.study.dueQueue).mockReset();
-    vi.mocked(api.study.bonusNewCards).mockReset().mockResolvedValue([]);
-    vi.mocked(api.study.aheadReviews).mockReset().mockResolvedValue([]);
-    vi.mocked(api.study.queueCards).mockReset();
+    vi.mocked(api.study.studyBatch).mockReset();
     vi.mocked(api.study.submitReview).mockReset();
   });
 
   it("shows an empty state when nothing is due", async () => {
-    mockDueItems([]);
+    mockStudyBatch([]);
     renderStudyPage();
 
     expect(await screen.findByText("Nothing due right now. Nice work.")).toBeInTheDocument();
   });
 
   it("shows only the prompt, never the solution, before reveal", async () => {
-    mockDueItems([item()]);
+    mockStudyBatch([item()]);
     renderStudyPage();
 
     expect(await screen.findByText("dog")).toBeInTheDocument();
@@ -86,9 +74,18 @@ describe("StudyPage", () => {
     expect(screen.queryByRole("button", { name: "Again" })).not.toBeInTheDocument();
   });
 
+  it("does not keep refetching once a batch smaller than the requested size signals nothing more is available right now", async () => {
+    mockStudyBatch([item()]);
+    renderStudyPage();
+    await screen.findByText("dog");
+
+    // Give any runaway refetch loop a chance to happen before asserting.
+    await waitFor(() => expect(api.study.studyBatch).toHaveBeenCalledTimes(1));
+  });
+
   it("reveals the full solution and the rating buttons after Reveal is clicked", async () => {
     const user = userEvent.setup();
-    mockDueItems([item()]);
+    mockStudyBatch([item()]);
     renderStudyPage();
     await screen.findByText("dog");
 
@@ -106,7 +103,7 @@ describe("StudyPage", () => {
 
   it("submits the rating with the card's id and direction", async () => {
     const user = userEvent.setup();
-    mockDueItems([item({ card_id: "card-42", direction: "2->1" })]);
+    mockStudyBatch([item({ card_id: "card-42", direction: "2->1" })]);
     vi.mocked(api.study.submitReview).mockResolvedValue(undefined);
     renderStudyPage();
     await screen.findByText("dog");
@@ -123,7 +120,7 @@ describe("StudyPage", () => {
 
   it("advances to the next card and hides the solution again after rating", async () => {
     const user = userEvent.setup();
-    mockDueItems([
+    mockStudyBatch([
       item({ card_id: "card-1", prompt: "dog" }),
       item({ card_id: "card-2", prompt: "cat", full: { title: "猫", subtitle: "", body: "", foot: "" } }),
     ]);
@@ -140,7 +137,7 @@ describe("StudyPage", () => {
 
   it("shows the empty state once the last card has been rated", async () => {
     const user = userEvent.setup();
-    mockDueItems([item()]);
+    mockStudyBatch([item()]);
     vi.mocked(api.study.submitReview).mockResolvedValue(undefined);
     renderStudyPage();
     await screen.findByText("dog");
@@ -153,16 +150,23 @@ describe("StudyPage", () => {
     );
   });
 
-  it("shows a running progress count", async () => {
-    mockDueItems([item(), item({ card_id: "card-2" })]);
+  it("shows a running studied count instead of a fixed total", async () => {
+    const user = userEvent.setup();
+    mockStudyBatch([item(), item({ card_id: "card-2" })]);
+    vi.mocked(api.study.submitReview).mockResolvedValue(undefined);
     renderStudyPage();
+    await screen.findByText("dog");
+    expect(screen.queryByText(/studied this session/)).not.toBeInTheDocument();
 
-    expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reveal" }));
+    await user.click(screen.getByRole("button", { name: "Good" }));
+
+    expect(await screen.findByText("1 studied this session")).toBeInTheDocument();
   });
 
   it("preserves line breaks in the body and foot text", async () => {
     const user = userEvent.setup();
-    mockDueItems([
+    mockStudyBatch([
       item({
         full: {
           title: "狗",
@@ -187,64 +191,61 @@ describe("StudyPage", () => {
     expect(foot).toHaveTextContent("这是我的狗。\n我很喜欢它。", { normalizeWhitespace: false });
   });
 
-  it("offers more new cards and studying ahead once the session is exhausted", async () => {
-    mockDueItems([]);
-    vi.mocked(api.study.bonusNewCards).mockResolvedValue([
-      { card_id: "bonus-1", direction: "1->2" },
-      { card_id: "bonus-2", direction: "1->2" },
-    ]);
-    vi.mocked(api.study.aheadReviews).mockResolvedValue([{ card_id: "ahead-1", direction: "1->2" }]);
+  it("offers to pull more new cards once the daily cap is reached", async () => {
+    mockStudyBatch([], 3);
     renderStudyPage();
 
-    expect(await screen.findByText("Study 2 more new cards today")).toBeInTheDocument();
-    expect(await screen.findByText("Study 1 card early (next 24h)")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Daily limit reached — nothing to review right now."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Pull 3 more new cards")).toBeInTheDocument();
   });
 
-  it("resumes studying with bonus new cards once that option is chosen", async () => {
-    const user = userEvent.setup();
-    mockDueItems([]);
-    const bonusItem = item({ card_id: "bonus-1", prompt: "bonus card" });
-    vi.mocked(api.study.bonusNewCards).mockResolvedValue([refOf(bonusItem)]);
-    vi.mocked(api.study.queueCards).mockResolvedValue([bonusItem]);
+  it("does not offer a bonus button when there truly is nothing left", async () => {
+    mockStudyBatch([], 0);
     renderStudyPage();
-    await screen.findByText("Study 1 more new card today");
 
-    await user.click(screen.getByText("Study 1 more new card today"));
+    expect(await screen.findByText("Nothing due right now. Nice work.")).toBeInTheDocument();
+    expect(screen.queryByText(/Pull \d+ more new card/)).not.toBeInTheDocument();
+  });
+
+  it("resumes studying with bonus new cards once 'pull more' is chosen, bypassing the cap for exactly that batch", async () => {
+    const user = userEvent.setup();
+    const bonusItem = item({ card_id: "bonus-1", prompt: "bonus card" });
+    vi.mocked(api.study.studyBatch).mockImplementation(async (_deckId, _limit, bypass) => {
+      if (bypass) return { items: [bonusItem], bonus_new_available: 0 };
+      return { items: [], bonus_new_available: 1 };
+    });
+    renderStudyPage();
+    await screen.findByText("Pull 1 more new card");
+
+    await user.click(screen.getByText("Pull 1 more new card"));
 
     expect(await screen.findByText("bonus card")).toBeInTheDocument();
     expect(screen.queryByText("Nothing due right now. Nice work.")).not.toBeInTheDocument();
+    expect(api.study.studyBatch).toHaveBeenCalledWith(DECK.id, 10, true);
   });
 
-  it("offers a bonus batch sized to the deck's daily cap, not the whole backlog", async () => {
+  it("automatically fetches another batch as the buffer runs low", async () => {
     const user = userEvent.setup();
-    const cappedDeck: Deck = { ...DECK, new_cards_per_day: 2 };
-    mockDueItems([]);
-    const bonusItems = [
-      item({ card_id: "bonus-1", prompt: "bonus 1" }),
-      item({ card_id: "bonus-2", prompt: "bonus 2" }),
-      item({ card_id: "bonus-3", prompt: "bonus 3" }),
-    ];
-    vi.mocked(api.study.bonusNewCards).mockResolvedValue(bonusItems.map(refOf));
-    vi.mocked(api.study.queueCards).mockImplementation(async (refs: QueueRef[]) =>
-      refs.map((ref) => bonusItems.find((i) => i.card_id === ref.card_id)!),
+    const firstBatch = Array.from({ length: 10 }, (_, i) =>
+      item({ card_id: `card-${i}`, prompt: `p${i}` }),
     );
+    const secondBatch = [item({ card_id: "card-10", prompt: "p10" })];
+    vi.mocked(api.study.studyBatch)
+      .mockResolvedValueOnce({ items: firstBatch, bonus_new_available: 0 })
+      .mockResolvedValueOnce({ items: secondBatch, bonus_new_available: 0 });
     vi.mocked(api.study.submitReview).mockResolvedValue(undefined);
-    renderStudyPage(vi.fn(), cappedDeck);
-    await screen.findByText("Study 2 more new cards today");
+    renderStudyPage();
+    await screen.findByText("p0");
 
-    await user.click(screen.getByText("Study 2 more new cards today"));
+    // Rate down to within the prefetch threshold (3) of the first batch's end.
+    for (let i = 0; i < 7; i++) {
+      await user.click(screen.getByRole("button", { name: "Reveal" }));
+      await user.click(screen.getByRole("button", { name: "Good" }));
+    }
 
-    // Only the first 2 (the deck's cap) should be in the queue, not all 3.
-    expect(await screen.findByText("bonus 1")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Reveal" }));
-    await user.click(screen.getByRole("button", { name: "Good" }));
-    expect(await screen.findByText("bonus 2")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Reveal" }));
-    await user.click(screen.getByRole("button", { name: "Good" }));
-
-    // The 3rd card is offered as a further (smaller) batch, not shown automatically.
-    expect(await screen.findByText("Study 1 more new card today")).toBeInTheDocument();
-    expect(screen.queryByText("bonus 3")).not.toBeInTheDocument();
+    await waitFor(() => expect(api.study.studyBatch).toHaveBeenCalledTimes(2));
   });
 
   it("fetches fresh data on a later visit instead of reusing a stale snapshot", async () => {
@@ -252,7 +253,7 @@ describe("StudyPage", () => {
     // and mounts/unmounts StudyPage as you navigate to and from it, so a
     // query cached indefinitely would show the same items forever.
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    mockDueItems([item({ card_id: "card-1", prompt: "dog" })]);
+    mockStudyBatch([item({ card_id: "card-1", prompt: "dog" })]);
     const { unmount } = render(
       <QueryClientProvider client={queryClient}>
         <StudyPage deck={DECK} onBack={vi.fn()} />
@@ -263,7 +264,7 @@ describe("StudyPage", () => {
 
     // Simulate having rated "dog" and a different card being due by the time
     // the user comes back.
-    mockDueItems([item({ card_id: "card-2", prompt: "cat" })]);
+    mockStudyBatch([item({ card_id: "card-2", prompt: "cat" })]);
     render(
       <QueryClientProvider client={queryClient}>
         <StudyPage deck={DECK} onBack={vi.fn()} />

@@ -3,12 +3,10 @@ import type {
   Card,
   CardPage,
   Deck,
-  DueItem,
   ImportMode,
   NewCard,
   NewDeck,
-  QueueManifest,
-  QueueRef,
+  StudyBatch,
   SubmitReviewInput,
   UpdateCard,
   UpdateDeck,
@@ -42,11 +40,8 @@ export const api = {
     resetProgress: (id: string) => invoke<void>("reset_card_progress", { id }),
   },
   study: {
-    dueQueue: (deckId: string | null) => invoke<QueueManifest>("get_due_queue", { deckId }),
-    bonusNewCards: (deckId: string) => invoke<QueueRef[]>("get_bonus_new_cards", { deckId }),
-    aheadReviews: (deckId: string, aheadHours: number) =>
-      invoke<QueueRef[]>("get_ahead_reviews", { deckId, aheadHours }),
-    queueCards: (refs: QueueRef[]) => invoke<DueItem[]>("get_queue_cards", { refs }),
+    studyBatch: (deckId: string | null, limit: number, bypassNewCardCap: boolean) =>
+      invoke<StudyBatch>("get_study_batch", { deckId, limit, bypassNewCardCap }),
     submitReview: (input: SubmitReviewInput) => invoke<void>("submit_review", { input }),
   },
   importExport: {
