@@ -182,11 +182,10 @@ pub fn log_review(
 
 /// Every review item (state != New) currently due (`due <= now`) across all
 /// decks, or a single deck if `deck_id` is given. Unbounded by design — a
-/// study session needs to know the true count of everything due today, not
-/// a SQL-capped slice of it; callers page through the (already-shuffled)
-/// result themselves. Ordered oldest-due first as a deterministic base,
-/// before any shuffling. Excludes items still awaiting their first review —
-/// those are introduced separately, see `commands::study::select_new_items`.
+/// study batch needs to prioritize by how overdue an item is, not stop at an
+/// arbitrary SQL LIMIT before comparing. Ordered oldest-due (most overdue)
+/// first. Excludes items still awaiting their first review — those are
+/// introduced separately, see `commands::study::ordered_new_candidates`.
 pub fn due_review_items(
     conn: &Connection,
     deck_id: Option<&str>,
@@ -200,65 +199,6 @@ pub fn due_review_items(
     )?;
     let rows = stmt
         .query_map(params![now, deck_id], |row| {
-            let direction: String = row.get(1)?;
-            Ok((row.get::<_, String>(0)?, direction))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(rows
-        .into_iter()
-        .filter_map(|(card_id, direction)| Direction::parse(&direction).map(|d| (card_id, d)))
-        .collect())
-}
-
-/// Review items due later than `now` but no later than `until` — the "study
-/// ahead of schedule" bonus pool offered once a session's normal due items
-/// are exhausted. Disjoint from `due_review_items` by construction (`due >
-/// now` here vs `due <= now` there), so the two never overlap.
-pub fn ahead_review_items(
-    conn: &Connection,
-    deck_id: Option<&str>,
-    now: DateTime<Utc>,
-    until: DateTime<Utc>,
-) -> AppResult<Vec<(String, Direction)>> {
-    let mut stmt = conn.prepare(
-        "SELECT rs.card_id, rs.direction FROM review_state rs
-         JOIN cards c ON c.id = rs.card_id
-         WHERE rs.due > ?1 AND rs.due <= ?2 AND rs.state != 'New' AND (?3 IS NULL OR c.deck_id = ?3)
-         ORDER BY rs.due ASC, rs.card_id ASC",
-    )?;
-    let rows = stmt
-        .query_map(params![now, until, deck_id], |row| {
-            let direction: String = row.get(1)?;
-            Ok((row.get::<_, String>(0)?, direction))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(rows
-        .into_iter()
-        .filter_map(|(card_id, direction)| Direction::parse(&direction).map(|d| (card_id, d)))
-        .collect())
-}
-
-/// New (never-yet-reviewed) items across all decks, or a single deck if
-/// `deck_id` is given, oldest-due first. Used for the `deck_id: None`
-/// "everything due" mode, which doesn't yet have a UI and so isn't subject
-/// to per-deck leveling/daily caps.
-pub fn due_new_items(
-    conn: &Connection,
-    deck_id: Option<&str>,
-    now: DateTime<Utc>,
-    limit: i64,
-) -> AppResult<Vec<(String, Direction)>> {
-    let mut stmt = conn.prepare(
-        "SELECT rs.card_id, rs.direction FROM review_state rs
-         JOIN cards c ON c.id = rs.card_id
-         WHERE rs.due <= ?1 AND rs.state = 'New' AND (?2 IS NULL OR c.deck_id = ?2)
-         ORDER BY rs.due ASC
-         LIMIT ?3",
-    )?;
-    let rows = stmt
-        .query_map(params![now, deck_id, limit], |row| {
             let direction: String = row.get(1)?;
             Ok((row.get::<_, String>(0)?, direction))
         })?
@@ -569,86 +509,6 @@ mod tests {
                 (card_b.id.clone(), Direction::FaceOneToTwo),
             ]
         );
-    }
-
-    #[test]
-    fn ahead_review_items_only_returns_items_due_after_now_and_within_the_window() {
-        let conn = db::test_connection();
-        let deck = new_deck(&conn, "Deck");
-        let card_overdue = new_card(&conn, &deck.id);
-        let card_within_window = new_card(&conn, &deck.id);
-        let card_beyond_window = new_card(&conn, &deck.id);
-        let now = Utc::now();
-        let until = now + Duration::hours(24);
-
-        seed_reviewed(
-            &conn,
-            &card_overdue.id,
-            Direction::FaceOneToTwo,
-            now - Duration::hours(1),
-        );
-        seed_reviewed(
-            &conn,
-            &card_within_window.id,
-            Direction::FaceOneToTwo,
-            now + Duration::hours(12),
-        );
-        seed_reviewed(
-            &conn,
-            &card_beyond_window.id,
-            Direction::FaceOneToTwo,
-            now + Duration::hours(48),
-        );
-
-        let ahead = ahead_review_items(&conn, None, now, until).unwrap();
-
-        assert_eq!(
-            ahead,
-            vec![(card_within_window.id.clone(), Direction::FaceOneToTwo)]
-        );
-    }
-
-    #[test]
-    fn ahead_review_items_filters_by_deck_id() {
-        let conn = db::test_connection();
-        let deck_a = new_deck(&conn, "Deck A");
-        let deck_b = new_deck(&conn, "Deck B");
-        let card_a = new_card(&conn, &deck_a.id);
-        let card_b = new_card(&conn, &deck_b.id);
-        let now = Utc::now();
-        let until = now + Duration::hours(24);
-        seed_reviewed(
-            &conn,
-            &card_a.id,
-            Direction::FaceOneToTwo,
-            now + Duration::hours(1),
-        );
-        seed_reviewed(
-            &conn,
-            &card_b.id,
-            Direction::FaceOneToTwo,
-            now + Duration::hours(1),
-        );
-
-        let ahead = ahead_review_items(&conn, Some(&deck_a.id), now, until).unwrap();
-
-        assert_eq!(ahead, vec![(card_a.id.clone(), Direction::FaceOneToTwo)]);
-    }
-
-    #[test]
-    fn due_new_items_only_returns_cards_still_in_the_new_state() {
-        let conn = db::test_connection();
-        let deck = new_deck(&conn, "Deck");
-        let new_card_ = new_card(&conn, &deck.id);
-        let reviewed_card = new_card(&conn, &deck.id);
-        let now = Utc::now();
-        let due_state = crate::srs::new_card_state(now);
-        seed(&conn, &new_card_.id, Direction::FaceOneToTwo, &due_state).unwrap();
-        seed_reviewed(&conn, &reviewed_card.id, Direction::FaceOneToTwo, now);
-
-        let due = due_new_items(&conn, None, now, 10).unwrap();
-
-        assert_eq!(due, vec![(new_card_.id.clone(), Direction::FaceOneToTwo)]);
     }
 
     #[test]
