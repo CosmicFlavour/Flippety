@@ -126,6 +126,12 @@
     }
   body {
     @apply bg-background text-foreground;
+    /* Android (edge-to-edge is mandatory as of API 35) and iOS both draw the
+       webview behind the status bar / notch / home indicator, so the app has
+       to inset its own content — these fall back to 0 wherever there's no
+       cutout (desktop, older Android). */
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+      env(safe-area-inset-bottom) env(safe-area-inset-left);
     }
   html {
     @apply font-sans;
