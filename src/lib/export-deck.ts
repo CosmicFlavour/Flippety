@@ -1,4 +1,5 @@
 import { save } from "@tauri-apps/plugin-dialog";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { api } from "@/lib/api";
 import type { Deck } from "@/types/models";
 
@@ -10,6 +11,10 @@ export async function exportDeckToFile(deck: Deck): Promise<boolean> {
     filters: [{ name: "JSON", extensions: ["json"] }],
   });
   if (!path) return false;
-  await api.importExport.exportDeck(deck.id, path);
+  const json = await api.importExport.exportDeck(deck.id);
+  // Writing via the fs plugin (rather than a Rust-side fs::write) is what
+  // makes this work on Android, where `path` here is a `content://` URI, not
+  // a real filesystem path.
+  await writeTextFile(path, json);
   return true;
 }

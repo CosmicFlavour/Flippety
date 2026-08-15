@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { ImportDeckDialog } from "./ImportDeckDialog";
 import { api } from "@/lib/api";
 import { open } from "@tauri-apps/plugin-dialog";
+import { readTextFile } from "@tauri-apps/plugin-fs";
 import type { Deck } from "@/types/models";
 
 vi.mock("@/lib/api", () => ({
@@ -12,6 +13,10 @@ vi.mock("@/lib/api", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/plugin-fs", () => ({
+  readTextFile: vi.fn(),
 }));
 
 const EXISTING_DECK: Deck = {
@@ -49,6 +54,7 @@ async function openDialog(existingDecks: Deck[] = [EXISTING_DECK]) {
 describe("ImportDeckDialog", () => {
   beforeEach(() => {
     vi.mocked(open).mockReset();
+    vi.mocked(readTextFile).mockReset().mockResolvedValue("{}");
     vi.mocked(api.importExport.importDeck).mockReset();
   });
 
@@ -92,12 +98,17 @@ describe("ImportDeckDialog", () => {
   it("imports as a new deck by default", async () => {
     const { user, onImported } = await openDialog();
     vi.mocked(open).mockResolvedValue("/home/user/deck.json");
+    vi.mocked(readTextFile).mockResolvedValue('{"deck":{"name":"Deck"},"cards":[]}');
     vi.mocked(api.importExport.importDeck).mockResolvedValue(IMPORTED_DECK);
     await user.click(screen.getByText("Choose file…"));
 
     await user.click(screen.getByRole("button", { name: "Import" }));
 
-    expect(api.importExport.importDeck).toHaveBeenCalledWith("/home/user/deck.json", {
+    // Reads via the fs plugin — required so this works with a `content://`
+    // URI on Android, not just a real path — then hands the file's *content*
+    // (not the path) to the backend.
+    expect(readTextFile).toHaveBeenCalledWith("/home/user/deck.json");
+    expect(api.importExport.importDeck).toHaveBeenCalledWith('{"deck":{"name":"Deck"},"cards":[]}', {
       mode: "new",
     });
     expect(onImported).toHaveBeenCalledWith(IMPORTED_DECK);
@@ -106,13 +117,14 @@ describe("ImportDeckDialog", () => {
   it("imports as a merge into the selected deck", async () => {
     const { user } = await openDialog();
     vi.mocked(open).mockResolvedValue("/home/user/deck.json");
+    vi.mocked(readTextFile).mockResolvedValue('{"deck":{"name":"Deck"},"cards":[]}');
     vi.mocked(api.importExport.importDeck).mockResolvedValue(EXISTING_DECK);
     await user.click(screen.getByText("Choose file…"));
     await user.selectOptions(screen.getByLabelText("Import into"), "deck-1");
 
     await user.click(screen.getByRole("button", { name: "Import" }));
 
-    expect(api.importExport.importDeck).toHaveBeenCalledWith("/home/user/deck.json", {
+    expect(api.importExport.importDeck).toHaveBeenCalledWith('{"deck":{"name":"Deck"},"cards":[]}', {
       mode: "merge",
       deck_id: "deck-1",
     });

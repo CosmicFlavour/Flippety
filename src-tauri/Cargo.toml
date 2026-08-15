@@ -29,5 +29,6 @@ chrono = { version = "0.4", features = ["serde"] }
 rs-fsrs = { version = "1", features = ["serde"] }
 thiserror = "2"
 tauri-plugin-dialog = "2.7.2"
+tauri-plugin-fs = "2"
 rand = "0.8"
 

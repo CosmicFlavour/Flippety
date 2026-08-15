@@ -45,9 +45,11 @@ export const api = {
     submitReview: (input: SubmitReviewInput) => invoke<void>("submit_review", { input }),
   },
   importExport: {
-    exportDeck: (deckId: string, targetPath: string) =>
-      invoke<void>("export_deck", { deckId, targetPath }),
-    importDeck: (sourcePath: string, mode: ImportMode) =>
-      invoke<Deck>("import_deck", { sourcePath, mode }),
+    // Returns/takes file *content*, not a path — writing/reading the file
+    // itself is the caller's job (via the fs plugin), since on Android the
+    // dialog plugin hands back a `content://` URI rather than a real path.
+    exportDeck: (deckId: string) => invoke<string>("export_deck", { deckId }),
+    importDeck: (content: string, mode: ImportMode) =>
+      invoke<Deck>("import_deck", { content, mode }),
   },
 };

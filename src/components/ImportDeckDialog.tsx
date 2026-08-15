@@ -1,5 +1,6 @@
 import { useState, type ReactElement } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { readTextFile } from "@tauri-apps/plugin-fs";
 import { api } from "@/lib/api";
 import type { Deck, ImportMode } from "@/types/models";
 import { Button } from "@/components/ui/button";
@@ -49,7 +50,11 @@ export function ImportDeckDialog({
     setError(null);
     try {
       const mode: ImportMode = target === "new" ? { mode: "new" } : { mode: "merge", deck_id: target };
-      const deck = await api.importExport.importDeck(path, mode);
+      // Read via the fs plugin rather than handing the path to Rust — on
+      // Android `path` is a `content://` URI, which only the fs plugin's
+      // mobile-aware `readTextFile` can resolve, not a real filesystem path.
+      const content = await readTextFile(path);
+      const deck = await api.importExport.importDeck(content, mode);
       onImported(deck);
       setOpen(false);
       reset();

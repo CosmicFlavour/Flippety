@@ -6,7 +6,6 @@ use crate::models::deck::Deck;
 use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use tauri::State;
 use uuid::Uuid;
 
@@ -70,13 +69,14 @@ fn export_deck_json(conn: &Connection, deck_id: &str) -> AppResult<String> {
     Ok(serde_json::to_string_pretty(&export)?)
 }
 
-/// Writes a deck and its cards' content (no review progress) to `target_path` as JSON.
+/// A deck and its cards' content (no review progress) as JSON. Writing it to
+/// disk is the frontend's job (via the fs plugin) — on Android, the path the
+/// save dialog returns is a `content://` URI that only the fs plugin's
+/// mobile-aware `writeTextFile` can resolve, not a real filesystem path.
 #[tauri::command]
-pub fn export_deck(state: State<AppState>, deck_id: String, target_path: String) -> AppResult<()> {
+pub fn export_deck(state: State<AppState>, deck_id: String) -> AppResult<String> {
     let conn = state.conn();
-    let json = export_deck_json(&conn, &deck_id)?;
-    fs::write(target_path, json)?;
-    Ok(())
+    export_deck_json(&conn, &deck_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,15 +185,14 @@ fn import_deck_json(conn: &mut Connection, raw: &str, mode: ImportMode) -> AppRe
     Ok(deck)
 }
 
+/// `content` is the already-read file text, not a path — the frontend reads
+/// it via the fs plugin before calling this, since on Android the file
+/// picker returns a `content://` URI that only the fs plugin's mobile-aware
+/// `readTextFile` can resolve, not a real filesystem path.
 #[tauri::command]
-pub fn import_deck(
-    state: State<AppState>,
-    source_path: String,
-    mode: ImportMode,
-) -> AppResult<Deck> {
-    let raw = fs::read_to_string(&source_path)?;
+pub fn import_deck(state: State<AppState>, content: String, mode: ImportMode) -> AppResult<Deck> {
     let mut conn = state.conn();
-    import_deck_json(&mut conn, &raw, mode)
+    import_deck_json(&mut conn, &content, mode)
 }
 
 #[cfg(test)]
