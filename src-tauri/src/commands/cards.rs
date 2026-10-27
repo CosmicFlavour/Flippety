@@ -139,7 +139,7 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             name: "Test deck".into(),
             description: None,
-            new_cards_per_day: None,
+            intro_direction: Direction::FaceOneToTwo,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

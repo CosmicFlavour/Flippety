@@ -1,3 +1,4 @@
+use crate::models::card::{default_intro_direction, Direction};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -6,8 +7,10 @@ pub struct Deck {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
-    /// Cap on how many new cards may be introduced per day. `None` = unlimited.
-    pub new_cards_per_day: Option<i64>,
+    /// Which direction of a new two-direction card is introduced first; the
+    /// other direction is staggered (see `db::cards::new_card_candidates`).
+    /// Moot for single-direction cards.
+    pub intro_direction: Direction,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -16,7 +19,8 @@ pub struct Deck {
 pub struct NewDeck {
     pub name: String,
     pub description: Option<String>,
-    pub new_cards_per_day: Option<i64>,
+    #[serde(default = "default_intro_direction")]
+    pub intro_direction: Direction,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -24,5 +28,6 @@ pub struct UpdateDeck {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
-    pub new_cards_per_day: Option<i64>,
+    #[serde(default = "default_intro_direction")]
+    pub intro_direction: Direction,
 }

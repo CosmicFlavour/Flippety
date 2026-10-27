@@ -18,7 +18,7 @@ fn create_deck_inner(conn: &Connection, input: NewDeck) -> AppResult<Deck> {
         id: Uuid::new_v4().to_string(),
         name,
         description: input.description,
-        new_cards_per_day: input.new_cards_per_day,
+        intro_direction: input.intro_direction,
         created_at: now,
         updated_at: now,
     };
@@ -37,7 +37,7 @@ fn rename_deck_inner(conn: &Connection, input: UpdateDeck) -> AppResult<()> {
     let updated = Deck {
         name,
         description: input.description,
-        new_cards_per_day: input.new_cards_per_day,
+        intro_direction: input.intro_direction,
         updated_at: Utc::now(),
         ..existing
     };
@@ -80,6 +80,7 @@ pub fn delete_deck(state: State<AppState>, id: String) -> AppResult<()> {
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::*;
+    use crate::models::card::Direction;
 
     pub fn new_deck(conn: &Connection, name: &str) -> Deck {
         create_deck_inner(
@@ -87,7 +88,7 @@ pub(crate) mod tests_support {
             NewDeck {
                 name: name.to_string(),
                 description: None,
-                new_cards_per_day: None,
+                intro_direction: Direction::FaceOneToTwo,
             },
         )
         .unwrap()
@@ -103,7 +104,7 @@ mod tests {
         NewDeck {
             name: name.to_string(),
             description: Some("A test deck".into()),
-            new_cards_per_day: None,
+            intro_direction: Direction::FaceOneToTwo,
         }
     }
 
@@ -138,7 +139,7 @@ mod tests {
                 id: deck.id.clone(),
                 name: "  Chinese HSK1 (renamed)  ".into(),
                 description: Some("Updated description".into()),
-                new_cards_per_day: None,
+                intro_direction: Direction::FaceOneToTwo,
             },
         )
         .unwrap();
@@ -159,7 +160,7 @@ mod tests {
                 id: deck.id,
                 name: "   ".into(),
                 description: None,
-                new_cards_per_day: None,
+                intro_direction: Direction::FaceOneToTwo,
             },
         )
         .unwrap_err();
@@ -176,7 +177,7 @@ mod tests {
                 id: "does-not-exist".into(),
                 name: "Anything".into(),
                 description: None,
-                new_cards_per_day: None,
+                intro_direction: Direction::FaceOneToTwo,
             },
         )
         .unwrap_err();

@@ -1,5 +1,6 @@
 use crate::error::AppResult;
-use crate::models::card::{Card, CardFull, Direction};
+use crate::models::card::{Card, CardFull, Direction, ExcludeItem};
+use chrono::{DateTime, Utc};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::de::DeserializeOwned;
@@ -204,7 +205,7 @@ pub fn delete(conn: &Connection, id: &str) -> AppResult<bool> {
 /// A card still awaiting its first review in at least one direction, along
 /// with what's needed to order it for introduction: `level` picks the tier
 /// (ascending), and `directions` lists only the directions that are still
-/// `New`.
+/// `New`, currently due, and not excluded.
 pub struct NewCardCandidate {
     pub card_id: String,
     pub level: i64,
@@ -214,23 +215,45 @@ pub struct NewCardCandidate {
 /// New-card candidates for `deck_id`, one row per card, pre-sorted
 /// `level ASC, created_at ASC`. Fine-grained shuffling happens in
 /// `commands::study`.
-pub fn new_card_candidates(conn: &Connection, deck_id: &str) -> AppResult<Vec<NewCardCandidate>> {
+///
+/// A direction only counts as a candidate if it's still `New` *and*
+/// currently due (`due <= now`) — a staggered sibling (see
+/// `commands::study::introduce_candidate`) has `state = 'New'` but a future
+/// `due`, so it's excluded here until its due time arrives. `exclude`
+/// additionally drops one specific card+direction regardless of its due
+/// time, so prefetching the item after the one already on screen can't
+/// return that same not-yet-reviewed item again.
+pub fn new_card_candidates(
+    conn: &Connection,
+    deck_id: &str,
+    now: DateTime<Utc>,
+    exclude: Option<&ExcludeItem>,
+) -> AppResult<Vec<NewCardCandidate>> {
     let mut stmt = conn.prepare(
         "SELECT c.id, c.level, rs.direction
          FROM cards c
          JOIN review_state rs ON rs.card_id = c.id
-         WHERE c.deck_id = ?1 AND rs.state = 'New'
+         WHERE c.deck_id = ?1 AND rs.state = 'New' AND rs.due <= ?2
+           AND (?3 IS NULL OR NOT (c.id = ?3 AND rs.direction = ?4))
          ORDER BY c.level ASC, c.created_at ASC",
     )?;
     let rows = stmt
-        .query_map(params![deck_id], |row| {
-            let direction: String = row.get("direction")?;
-            Ok((
-                row.get::<_, String>("id")?,
-                row.get::<_, i64>("level")?,
-                direction,
-            ))
-        })?
+        .query_map(
+            params![
+                deck_id,
+                now,
+                exclude.map(|e| e.card_id.as_str()),
+                exclude.map(|e| e.direction.as_str())
+            ],
+            |row| {
+                let direction: String = row.get("direction")?;
+                Ok((
+                    row.get::<_, String>("id")?,
+                    row.get::<_, i64>("level")?,
+                    direction,
+                ))
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut candidates: Vec<NewCardCandidate> = Vec::new();
@@ -266,7 +289,7 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             name: "Test deck".into(),
             description: None,
-            new_cards_per_day: None,
+            intro_direction: Direction::FaceOneToTwo,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -311,7 +334,7 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             name: "Test deck".into(),
             description: None,
-            new_cards_per_day: None,
+            intro_direction: Direction::FaceOneToTwo,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

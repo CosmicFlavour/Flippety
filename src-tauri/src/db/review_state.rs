@@ -1,8 +1,13 @@
 use crate::error::AppResult;
-use crate::models::card::Direction;
-use chrono::{DateTime, Utc};
+use crate::models::card::{Direction, ExcludeItem};
+use chrono::{DateTime, Duration, Utc};
 use rs_fsrs::{Card as FsrsCard, Rating, ReviewLog, State};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+
+/// How far a new card's un-introduced sibling direction's `due` is pushed
+/// forward when the other direction is introduced, so both directions of
+/// the same card can't surface in the same sitting.
+pub const SIBLING_STAGGER: Duration = Duration::minutes(2);
 
 pub fn state_to_str(state: State) -> &'static str {
     match state {
@@ -100,6 +105,25 @@ pub fn upsert(
     Ok(())
 }
 
+/// Pushes `direction`'s `due` forward by `SIBLING_STAGGER` from `now`,
+/// without otherwise touching its New state — used when a new card's other
+/// direction is being introduced this turn, so this one doesn't also
+/// surface in the same sitting. No-op if the row isn't still New (this
+/// should only ever be called on a still-New sibling; a `rows_affected == 0`
+/// outcome is acceptable and ignored rather than treated as an error).
+pub fn defer_new_direction(
+    conn: &Connection,
+    card_id: &str,
+    direction: Direction,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE review_state SET due = ?1 WHERE card_id = ?2 AND direction = ?3 AND state = 'New'",
+        params![now + SIBLING_STAGGER, card_id, direction.as_str()],
+    )?;
+    Ok(())
+}
+
 pub fn existing_directions(conn: &Connection, card_id: &str) -> AppResult<Vec<Direction>> {
     let mut stmt = conn.prepare("SELECT direction FROM review_state WHERE card_id = ?1")?;
     let rows = stmt
@@ -186,22 +210,35 @@ pub fn log_review(
 /// arbitrary SQL LIMIT before comparing. Ordered oldest-due (most overdue)
 /// first. Excludes items still awaiting their first review — those are
 /// introduced separately, see `commands::study::ordered_new_candidates`.
+/// `exclude` drops one specific card+direction regardless of its due time,
+/// so prefetching the item after the one already on screen can't return
+/// that same not-yet-reviewed item again.
 pub fn due_review_items(
     conn: &Connection,
     deck_id: Option<&str>,
     now: DateTime<Utc>,
+    exclude: Option<&ExcludeItem>,
 ) -> AppResult<Vec<(String, Direction)>> {
     let mut stmt = conn.prepare(
         "SELECT rs.card_id, rs.direction FROM review_state rs
          JOIN cards c ON c.id = rs.card_id
          WHERE rs.due <= ?1 AND rs.state != 'New' AND (?2 IS NULL OR c.deck_id = ?2)
+           AND (?3 IS NULL OR NOT (rs.card_id = ?3 AND rs.direction = ?4))
          ORDER BY rs.due ASC, rs.card_id ASC",
     )?;
     let rows = stmt
-        .query_map(params![now, deck_id], |row| {
-            let direction: String = row.get(1)?;
-            Ok((row.get::<_, String>(0)?, direction))
-        })?
+        .query_map(
+            params![
+                now,
+                deck_id,
+                exclude.map(|e| e.card_id.as_str()),
+                exclude.map(|e| e.direction.as_str())
+            ],
+            |row| {
+                let direction: String = row.get(1)?;
+                Ok((row.get::<_, String>(0)?, direction))
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(rows
@@ -211,7 +248,8 @@ pub fn due_review_items(
 }
 
 /// Count of distinct cards in `deck_id` whose first-ever review happened on
-/// the same calendar day as `now`, used to enforce a deck's daily new-card cap.
+/// the same *local* calendar day as `now` — feeds the milestone count
+/// surfaced after a card's first review (see `commands::study::submit_review`).
 pub fn new_cards_introduced_today(
     conn: &Connection,
     deck_id: &str,
@@ -220,7 +258,8 @@ pub fn new_cards_introduced_today(
     conn.query_row(
         "SELECT COUNT(DISTINCT rs.card_id) FROM review_state rs
          JOIN cards c ON c.id = rs.card_id
-         WHERE c.deck_id = ?1 AND rs.reps = 1 AND date(rs.last_review) = date(?2)",
+         WHERE c.deck_id = ?1 AND rs.reps = 1
+           AND date(rs.last_review, 'localtime') = date(?2, 'localtime')",
         params![deck_id, now],
         |row| row.get(0),
     )
@@ -429,7 +468,7 @@ mod tests {
             now + Duration::days(1),
         );
 
-        let due = due_review_items(&conn, None, now).unwrap();
+        let due = due_review_items(&conn, None, now, None).unwrap();
 
         assert_eq!(due, vec![(card.id.clone(), Direction::FaceOneToTwo)]);
     }
@@ -443,7 +482,7 @@ mod tests {
         let due_state = crate::srs::new_card_state(now);
         seed(&conn, &card.id, Direction::FaceOneToTwo, &due_state).unwrap();
 
-        let due = due_review_items(&conn, None, now).unwrap();
+        let due = due_review_items(&conn, None, now, None).unwrap();
 
         assert!(due.is_empty());
     }
@@ -459,7 +498,7 @@ mod tests {
         seed_reviewed(&conn, &card_a.id, Direction::FaceOneToTwo, now);
         seed_reviewed(&conn, &card_b.id, Direction::FaceOneToTwo, now);
 
-        let due = due_review_items(&conn, Some(&deck_a.id), now).unwrap();
+        let due = due_review_items(&conn, Some(&deck_a.id), now, None).unwrap();
 
         assert_eq!(due, vec![(card_a.id.clone(), Direction::FaceOneToTwo)]);
     }
@@ -474,7 +513,7 @@ mod tests {
             seed_reviewed(&conn, &card.id, Direction::FaceOneToTwo, now);
         }
 
-        let due = due_review_items(&conn, None, now).unwrap();
+        let due = due_review_items(&conn, None, now, None).unwrap();
 
         assert_eq!(due.len(), 30);
     }
@@ -500,7 +539,7 @@ mod tests {
             now - Duration::days(1),
         );
 
-        let due = due_review_items(&conn, None, now).unwrap();
+        let due = due_review_items(&conn, None, now, None).unwrap();
 
         assert_eq!(
             due,
