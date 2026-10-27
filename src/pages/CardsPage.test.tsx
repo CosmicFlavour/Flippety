@@ -23,7 +23,7 @@ const DECK: Deck = {
   id: "deck-1",
   name: "Chinese HSK1",
   description: null,
-  new_cards_per_day: null,
+  intro_direction: "1->2",
   created_at: "",
   updated_at: "",
 };

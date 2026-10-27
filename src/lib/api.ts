@@ -3,11 +3,13 @@ import type {
   Card,
   CardPage,
   Deck,
+  Direction,
+  DueItem,
   ImportMode,
   NewCard,
   NewDeck,
-  StudyBatch,
   SubmitReviewInput,
+  SubmitReviewResult,
   UpdateCard,
   UpdateDeck,
 } from "@/types/models";
@@ -40,9 +42,10 @@ export const api = {
     resetProgress: (id: string) => invoke<void>("reset_card_progress", { id }),
   },
   study: {
-    studyBatch: (deckId: string | null, limit: number, bypassNewCardCap: boolean) =>
-      invoke<StudyBatch>("get_study_batch", { deckId, limit, bypassNewCardCap }),
-    submitReview: (input: SubmitReviewInput) => invoke<void>("submit_review", { input }),
+    nextItem: (deckId: string | null, exclude?: { card_id: string; direction: Direction }) =>
+      invoke<DueItem | null>("get_next_study_item", { deckId, exclude }),
+    submitReview: (input: SubmitReviewInput) =>
+      invoke<SubmitReviewResult>("submit_review", { input }),
   },
   importExport: {
     // Returns/takes file *content*, not a path — writing/reading the file

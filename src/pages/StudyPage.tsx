@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -7,76 +7,119 @@ import { Button } from "@/components/ui/button";
 import { Card as UiCard, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 
 const RATINGS: Rating[] = ["Again", "Hard", "Good", "Easy"];
-// How many items to pull per fetch. FSRS can make an item due again within
-// minutes (short-term learning steps), so there's no fixed "today's set" to
-// precompute — small batches keep what's on screen close to what's actually
-// due right now, without fetching after every single card.
-const BATCH_SIZE = 10;
-// Start fetching the next batch this many items before the buffer runs out.
-const PREFETCH_THRESHOLD = 3;
+
+// Non-blocking encouragement/pacing copy, keyed by the deck's running count
+// of new cards introduced today (see SubmitReviewResult.milestone) — the
+// backend only decides *whether* a milestone fired (every multiple of 5);
+// what it says is presentation, so it lives here. Descending thresholds
+// mean any count past 25 naturally keeps the last tier's copy.
+const MILESTONE_TIERS: { threshold: number; text: string }[] = [
+  { threshold: 25, text: "That's probably too much" },
+  { threshold: 20, text: "Maybe take a break" },
+  { threshold: 15, text: "Going strong" },
+  { threshold: 10, text: "On a streak!" },
+  { threshold: 5, text: "Good job" },
+];
+
+function milestoneCopy(count: number): string {
+  return MILESTONE_TIERS.find((tier) => count >= tier.threshold)?.text ?? "Good job";
+}
+
+type View =
+  | { kind: "loading" }
+  | { kind: "item"; item: DueItem }
+  | { kind: "milestone"; count: number }
+  | { kind: "nothing_available" }
+  | { kind: "error" };
+
+// Fetches the single next item to study. `exclude` asks for "the item after
+// the one already on screen" — nothing in the DB changes between showing an
+// item and submitting its review, so without this, fetching one item ahead
+// of an unanswered one would deterministically return that same item again.
+async function fetchNext(deckId: string, exclude?: DueItem): Promise<DueItem | "none" | "error"> {
+  try {
+    const item = await api.study.nextItem(
+      deckId,
+      exclude ? { card_id: exclude.card_id, direction: exclude.direction } : undefined,
+    );
+    return item ?? "none";
+  } catch {
+    return "error";
+  }
+}
 
 export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) {
-  const [queue, setQueue] = useState<DueItem[]>([]);
-  const [index, setIndex] = useState(0);
+  const [view, setView] = useState<View>({ kind: "loading" });
+  // One item fetched ahead of whatever's showing, so the next card is
+  // usually ready the instant the current one is rated.
+  const [prefetched, setPrefetched] = useState<DueItem | null>(null);
   const [revealed, setRevealed] = useState(false);
-  // True once a fetch has come back shorter than requested — stops
-  // auto-prefetching until either more becomes due or the user asks for more.
-  const [noMoreAvailable, setNoMoreAvailable] = useState(false);
-  const [bonusNewAvailable, setBonusNewAvailable] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState(false);
-  // Guards against overlapping fetches — the auto-refill effect firing again
-  // before a previous fetch (auto or manual) has settled.
-  const inFlightRef = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [studiedCount, setStudiedCount] = useState(0);
 
-  const loadMore = useCallback(
-    async (bypassNewCardCap: boolean) => {
-      if (inFlightRef.current) return;
-      inFlightRef.current = true;
-      setLoading(true);
-      setLoadError(false);
-      try {
-        const batch = await api.study.studyBatch(deck.id, BATCH_SIZE, bypassNewCardCap);
-        setBonusNewAvailable(batch.bonus_new_available);
-        setQueue((q) => [...q, ...batch.items]);
-        // A batch shorter than requested means the backend already exhausted
-        // everything due/introducible right now — no point asking again
-        // until more becomes due or the user asks for bonus cards.
-        setNoMoreAvailable(batch.items.length < BATCH_SIZE);
-      } catch {
-        setLoadError(true);
-      } finally {
-        // Always runs, success or failure, so "loading" can never get stuck.
-        setLoading(false);
-        inFlightRef.current = false;
-      }
-    },
-    [deck.id],
-  );
+  // The single place that decides what to show next — called right after a
+  // non-milestone rating and from the milestone screen's "Continue" button.
+  // Always resolves to a defined view (has an item, confirmed nothing
+  // available, or confirmed error), never leaves the UI silently stuck.
+  const advanceToNext = useCallback(async () => {
+    if (prefetched) {
+      const next = prefetched;
+      setPrefetched(null);
+      setView({ kind: "item", item: next });
+      setRevealed(false);
+      void fetchNext(deck.id, next).then((result) => {
+        if (result !== "none" && result !== "error") setPrefetched(result);
+      });
+      return;
+    }
+    setView({ kind: "loading" });
+    const result = await fetchNext(deck.id);
+    if (result === "none") {
+      setView({ kind: "nothing_available" });
+    } else if (result === "error") {
+      setView({ kind: "error" });
+    } else {
+      setView({ kind: "item", item: result });
+      setRevealed(false);
+      void fetchNext(deck.id, result).then((r) => {
+        if (r !== "none" && r !== "error") setPrefetched(r);
+      });
+    }
+  }, [deck.id, prefetched]);
 
-  // Keeps the buffer topped up as the user studies through it. Not an
-  // infinite-scroll "load more" — this is what makes the queue feel
-  // never-ending: once nothing is due and today's new-card cap is reached,
-  // it simply stops until the user asks for more.
   useEffect(() => {
-    if (noMoreAvailable) return;
-    if (queue.length - index > PREFETCH_THRESHOLD) return;
-    loadMore(false);
-  }, [index, queue.length, noMoreAvailable, loadMore]);
+    advanceToNext();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch once on mount
+  }, []);
 
-  // Optimistic: the next card shows immediately on click rather than
-  // waiting on the round-trip, since there's nothing the UI actually needs
-  // from the response (the rating is just persisted server-side).
   const submitReview = useMutation({
     mutationFn: (input: { card_id: string; direction: Direction; rating: Rating }) =>
       api.study.submitReview(input),
   });
 
-  const rate = (rating: Rating) => {
-    const current = queue[index];
-    submitReview.mutate({ card_id: current.card_id, direction: current.direction, rating });
-    setIndex((i) => i + 1);
-    setRevealed(false);
+  const rate = async (rating: Rating) => {
+    if (view.kind !== "item") return;
+    const item = view.item;
+    setSubmitting(true);
+    try {
+      const result = await submitReview.mutateAsync({
+        card_id: item.card_id,
+        direction: item.direction,
+        rating,
+      });
+      setStudiedCount((c) => c + 1);
+      if (result.milestone != null) {
+        setView({ kind: "milestone", count: result.milestone });
+      } else {
+        await advanceToNext();
+      }
+    } catch {
+      // Rating failed to save (surfaced via submitReview.isError below) —
+      // still advance so the session doesn't stall on a transient error.
+      await advanceToNext();
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const header = (
@@ -88,8 +131,7 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     </div>
   );
 
-  const initialLoading = queue.length === 0 && !noMoreAvailable && !loadError;
-  if (initialLoading) {
+  if (view.kind === "loading") {
     return (
       <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
         {header}
@@ -98,63 +140,79 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     );
   }
 
-  const item = queue[index];
-  const exhausted = !item && (noMoreAvailable || loadError);
-  const waitingForNextBatch = !item && !noMoreAvailable && !loadError;
+  if (view.kind === "milestone") {
+    return (
+      <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
+        {header}
+        <p className="text-lg font-medium">
+          {view.count} new cards today — {milestoneCopy(view.count)}
+        </p>
+        <Button onClick={() => void advanceToNext()}>Continue</Button>
+      </div>
+    );
+  }
 
+  if (view.kind === "nothing_available") {
+    return (
+      <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
+        {header}
+        <p className="text-muted-foreground">Nothing due right now. Nice work.</p>
+        <Button variant="outline" onClick={() => void advanceToNext()}>
+          Check again
+        </Button>
+        {studiedCount > 0 && (
+          <p className="text-sm text-muted-foreground">{studiedCount} studied this session</p>
+        )}
+      </div>
+    );
+  }
+
+  if (view.kind === "error") {
+    return (
+      <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
+        {header}
+        <p className="text-muted-foreground">Couldn't load more cards.</p>
+        <Button variant="outline" onClick={() => void advanceToNext()}>
+          Try again
+        </Button>
+      </div>
+    );
+  }
+
+  const item = view.item;
   return (
     <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
       {header}
 
-      {exhausted && (
-        <div className="flex flex-col gap-3">
-          <p className="text-muted-foreground">
-            {loadError
-              ? "Couldn't load more cards."
-              : bonusNewAvailable > 0
-                ? "Daily limit reached — nothing to review right now."
-                : "Nothing due right now. Nice work."}
-          </p>
-          {(loadError || bonusNewAvailable > 0) && (
-            <Button
-              variant="outline"
-              disabled={loading}
-              onClick={() => loadMore(loadError ? bonusNewAvailable > 0 : true)}
-            >
-              {loadError ? "Try again" : "Continue"}
-            </Button>
-          )}
-        </div>
-      )}
+      <UiCard>
+        <CardHeader>
+          <CardTitle className="text-2xl">{item.prompt}</CardTitle>
+        </CardHeader>
+        {revealed && (
+          <CardContent className="flex flex-col gap-2">
+            <div className="text-lg font-medium">{item.full.title}</div>
+            {item.full.subtitle && (
+              <div className="text-muted-foreground">{item.full.subtitle}</div>
+            )}
+            {item.full.body && <p className="whitespace-pre-line">{item.full.body}</p>}
+            {item.full.foot && (
+              <p className="whitespace-pre-line text-muted-foreground">{item.full.foot}</p>
+            )}
+          </CardContent>
+        )}
+      </UiCard>
 
-      {waitingForNextBatch && <p className="text-muted-foreground">Loading…</p>}
+      {!revealed && <Button onClick={() => setRevealed(true)}>Reveal</Button>}
 
-      {item && (
-        <UiCard>
-          <CardHeader>
-            <CardTitle className="text-2xl">{item.prompt}</CardTitle>
-          </CardHeader>
-          {revealed && (
-            <CardContent className="flex flex-col gap-2">
-              <div className="text-lg font-medium">{item.full.title}</div>
-              {item.full.subtitle && (
-                <div className="text-muted-foreground">{item.full.subtitle}</div>
-              )}
-              {item.full.body && <p className="whitespace-pre-line">{item.full.body}</p>}
-              {item.full.foot && (
-                <p className="whitespace-pre-line text-muted-foreground">{item.full.foot}</p>
-              )}
-            </CardContent>
-          )}
-        </UiCard>
-      )}
-
-      {item && !revealed && <Button onClick={() => setRevealed(true)}>Reveal</Button>}
-
-      {item && revealed && (
+      {revealed && (
         <div className="grid grid-cols-4 gap-2">
           {RATINGS.map((rating) => (
-            <Button key={rating} variant="outline" onClick={() => rate(rating)}>
+            <Button
+              key={rating}
+              variant="outline"
+              disabled={submitting}
+              onClick={() => rate(rating)}
+            >
               {rating}
             </Button>
           ))}
@@ -167,7 +225,9 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
         </p>
       )}
 
-      {index > 0 && <p className="text-sm text-muted-foreground">{index} studied this session</p>}
+      {studiedCount > 0 && (
+        <p className="text-sm text-muted-foreground">{studiedCount} studied this session</p>
+      )}
     </div>
   );
 }

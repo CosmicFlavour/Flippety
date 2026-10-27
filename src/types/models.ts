@@ -15,8 +15,10 @@ export interface Deck {
   id: string;
   name: string;
   description: string | null;
-  /** Cap on how many new cards may be introduced per day. `null` = unlimited. */
-  new_cards_per_day: number | null;
+  /** Which direction of a new two-direction card is introduced first; the
+   * other direction's introduction is staggered. Moot for single-direction
+   * cards. */
+  intro_direction: Direction;
   created_at: string;
   updated_at: string;
 }
@@ -43,14 +45,14 @@ export interface CardPage {
 export interface NewDeck {
   name: string;
   description?: string | null;
-  new_cards_per_day?: number | null;
+  intro_direction?: Direction;
 }
 
 export interface UpdateDeck {
   id: string;
   name: string;
   description?: string | null;
-  new_cards_per_day?: number | null;
+  intro_direction?: Direction;
 }
 
 export interface NewCard {
@@ -82,16 +84,16 @@ export interface DueItem {
   full: CardFull;
 }
 
-export interface StudyBatch {
-  items: DueItem[];
-  /** New-card items available beyond today's cap, not included in `items`. */
-  bonus_new_available: number;
-}
-
 export interface SubmitReviewInput {
   card_id: string;
   direction: Direction;
   rating: Rating;
+}
+
+export interface SubmitReviewResult {
+  /** Present only when this review was a card's first in this direction and
+   * the deck's local-day new-card count landed on a multiple of 5. */
+  milestone: number | null;
 }
 
 export type ImportMode = { mode: "new" } | { mode: "merge"; deck_id: string };
