@@ -38,6 +38,7 @@ pub fn run() {
             commands::study::reset_card_progress,
             commands::import_export::export_deck,
             commands::import_export::import_deck,
+            commands::stats::get_deck_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

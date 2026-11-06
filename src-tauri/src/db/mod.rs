@@ -5,6 +5,7 @@ use std::path::Path;
 pub mod cards;
 pub mod decks;
 pub mod review_state;
+pub mod stats;
 
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
