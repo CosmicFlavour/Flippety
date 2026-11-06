@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type { Deck, Direction, DueItem, Rating } from "@/types/models";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
 
 const RATINGS: Rating[] = ["Again", "Hard", "Good", "Easy"];
 
@@ -28,7 +35,6 @@ function milestoneCopy(count: number): string {
 type View =
   | { kind: "loading" }
   | { kind: "item"; item: DueItem }
-  | { kind: "milestone"; count: number }
   | { kind: "nothing_available" }
   | { kind: "error" };
 
@@ -54,22 +60,46 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
   // usually ready the instant the current one is rated.
   const [prefetched, setPrefetched] = useState<DueItem | null>(null);
   const [revealed, setRevealed] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
   const [studiedCount, setStudiedCount] = useState(0);
+  // Shown as a dismissible overlay on top of whatever `view` currently is —
+  // independent of it, since the milestone arrives asynchronously (see
+  // `rate` below) and shouldn't hold up advancing to the next card.
+  const [milestone, setMilestone] = useState<number | null>(null);
+  // Guards the background prefetch so at most one is ever in flight. Rating
+  // faster than a prefetch resolves means `prefetched` is still null on the
+  // next rate — without this guard, every one of those would fire another
+  // overlapping prefetch on top of the still-unresolved previous one, none
+  // of them ever cancelled, piling up an ever-growing backlog of requests
+  // behind the single backend connection (what made the wait after rating
+  // grow the longer a session went on).
+  const prefetchInFlightRef = useRef(false);
 
-  // The single place that decides what to show next — called right after a
-  // non-milestone rating and from the milestone screen's "Continue" button.
-  // Always resolves to a defined view (has an item, confirmed nothing
-  // available, or confirmed error), never leaves the UI silently stuck.
+  const refillPrefetch = useCallback(
+    (exclude: DueItem) => {
+      if (prefetchInFlightRef.current) return;
+      prefetchInFlightRef.current = true;
+      fetchNext(deck.id, exclude)
+        .then((result) => {
+          if (result !== "none" && result !== "error") setPrefetched(result);
+        })
+        .finally(() => {
+          prefetchInFlightRef.current = false;
+        });
+    },
+    [deck.id],
+  );
+
+  // The single place that decides what to show next — called right after
+  // rating a card. Always resolves to a defined view (has an item,
+  // confirmed nothing available, or confirmed error), never leaves the UI
+  // silently stuck.
   const advanceToNext = useCallback(async () => {
     if (prefetched) {
       const next = prefetched;
       setPrefetched(null);
       setView({ kind: "item", item: next });
       setRevealed(false);
-      void fetchNext(deck.id, next).then((result) => {
-        if (result !== "none" && result !== "error") setPrefetched(result);
-      });
+      refillPrefetch(next);
       return;
     }
     setView({ kind: "loading" });
@@ -81,11 +111,9 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     } else {
       setView({ kind: "item", item: result });
       setRevealed(false);
-      void fetchNext(deck.id, result).then((r) => {
-        if (r !== "none" && r !== "error") setPrefetched(r);
-      });
+      refillPrefetch(result);
     }
-  }, [deck.id, prefetched]);
+  }, [deck.id, prefetched, refillPrefetch]);
 
   useEffect(() => {
     advanceToNext();
@@ -97,29 +125,23 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
       api.study.submitReview(input),
   });
 
-  const rate = async (rating: Rating) => {
+  // Optimistic: the next card shows immediately on click, without waiting
+  // on the round-trip — the review is persisted in the background, and if
+  // it happens to land on a milestone, that pops in as an overlay as soon
+  // as the response arrives rather than gating the next card on it.
+  const rate = (rating: Rating) => {
     if (view.kind !== "item") return;
     const item = view.item;
-    setSubmitting(true);
-    try {
-      const result = await submitReview.mutateAsync({
-        card_id: item.card_id,
-        direction: item.direction,
-        rating,
-      });
-      setStudiedCount((c) => c + 1);
-      if (result.milestone != null) {
-        setView({ kind: "milestone", count: result.milestone });
-      } else {
-        await advanceToNext();
-      }
-    } catch {
-      // Rating failed to save (surfaced via submitReview.isError below) —
-      // still advance so the session doesn't stall on a transient error.
-      await advanceToNext();
-    } finally {
-      setSubmitting(false);
-    }
+    submitReview.mutate(
+      { card_id: item.card_id, direction: item.direction, rating },
+      {
+        onSuccess: (result) => {
+          setStudiedCount((c) => c + 1);
+          if (result.milestone != null) setMilestone(result.milestone);
+        },
+      },
+    );
+    void advanceToNext();
   };
 
   const header = (
@@ -131,31 +153,26 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     </div>
   );
 
+  const milestoneOverlay = (
+    <Dialog open={milestone != null} onOpenChange={(open) => !open && setMilestone(null)}>
+      <DialogContent showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>{milestone} new cards today</DialogTitle>
+        </DialogHeader>
+        <p className="text-muted-foreground">{milestone != null && milestoneCopy(milestone)}</p>
+        <DialogFooter>
+          <Button onClick={() => setMilestone(null)}>Continue</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+
+  let body: ReactNode;
   if (view.kind === "loading") {
-    return (
-      <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
-        {header}
-        <p className="text-muted-foreground">Loading…</p>
-      </div>
-    );
-  }
-
-  if (view.kind === "milestone") {
-    return (
-      <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
-        {header}
-        <p className="text-lg font-medium">
-          {view.count} new cards today — {milestoneCopy(view.count)}
-        </p>
-        <Button onClick={() => void advanceToNext()}>Continue</Button>
-      </div>
-    );
-  }
-
-  if (view.kind === "nothing_available") {
-    return (
-      <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
-        {header}
+    body = <p className="text-muted-foreground">Loading…</p>;
+  } else if (view.kind === "nothing_available") {
+    body = (
+      <>
         <p className="text-muted-foreground">Nothing due right now. Nice work.</p>
         <Button variant="outline" onClick={() => void advanceToNext()}>
           Check again
@@ -163,71 +180,69 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
         {studiedCount > 0 && (
           <p className="text-sm text-muted-foreground">{studiedCount} studied this session</p>
         )}
-      </div>
+      </>
     );
-  }
-
-  if (view.kind === "error") {
-    return (
-      <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
-        {header}
+  } else if (view.kind === "error") {
+    body = (
+      <>
         <p className="text-muted-foreground">Couldn't load more cards.</p>
         <Button variant="outline" onClick={() => void advanceToNext()}>
           Try again
         </Button>
-      </div>
+      </>
+    );
+  } else {
+    const item = view.item;
+    body = (
+      <>
+        <UiCard>
+          <CardHeader>
+            <CardTitle className="text-2xl">{item.prompt}</CardTitle>
+          </CardHeader>
+          {revealed && (
+            <CardContent className="flex flex-col gap-2">
+              <div className="text-lg font-medium">{item.full.title}</div>
+              {item.full.subtitle && (
+                <div className="text-muted-foreground">{item.full.subtitle}</div>
+              )}
+              {item.full.body && <p className="whitespace-pre-line">{item.full.body}</p>}
+              {item.full.foot && (
+                <p className="whitespace-pre-line text-muted-foreground">{item.full.foot}</p>
+              )}
+            </CardContent>
+          )}
+        </UiCard>
+
+        {!revealed && <Button onClick={() => setRevealed(true)}>Reveal</Button>}
+
+        {revealed && (
+          <div className="grid grid-cols-4 gap-2">
+            {RATINGS.map((rating) => (
+              <Button key={rating} variant="outline" onClick={() => rate(rating)}>
+                {rating}
+              </Button>
+            ))}
+          </div>
+        )}
+
+        {submitReview.isError && (
+          <p className="text-sm text-destructive">
+            Couldn't save your last rating — it may need to be repeated.
+          </p>
+        )}
+
+        {studiedCount > 0 && (
+          <p className="text-sm text-muted-foreground">{studiedCount} studied this session</p>
+        )}
+      </>
     );
   }
 
-  const item = view.item;
   return (
     <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
       {header}
-
-      <UiCard>
-        <CardHeader>
-          <CardTitle className="text-2xl">{item.prompt}</CardTitle>
-        </CardHeader>
-        {revealed && (
-          <CardContent className="flex flex-col gap-2">
-            <div className="text-lg font-medium">{item.full.title}</div>
-            {item.full.subtitle && (
-              <div className="text-muted-foreground">{item.full.subtitle}</div>
-            )}
-            {item.full.body && <p className="whitespace-pre-line">{item.full.body}</p>}
-            {item.full.foot && (
-              <p className="whitespace-pre-line text-muted-foreground">{item.full.foot}</p>
-            )}
-          </CardContent>
-        )}
-      </UiCard>
-
-      {!revealed && <Button onClick={() => setRevealed(true)}>Reveal</Button>}
-
-      {revealed && (
-        <div className="grid grid-cols-4 gap-2">
-          {RATINGS.map((rating) => (
-            <Button
-              key={rating}
-              variant="outline"
-              disabled={submitting}
-              onClick={() => rate(rating)}
-            >
-              {rating}
-            </Button>
-          ))}
-        </div>
-      )}
-
-      {submitReview.isError && (
-        <p className="text-sm text-destructive">
-          Couldn't save your last rating — it may need to be repeated.
-        </p>
-      )}
-
-      {studiedCount > 0 && (
-        <p className="text-sm text-muted-foreground">{studiedCount} studied this session</p>
-      )}
+      {body}
+      {milestoneOverlay}
     </div>
   );
 }

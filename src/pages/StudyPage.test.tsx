@@ -34,6 +34,14 @@ function item(overrides: Partial<DueItem> = {}): DueItem {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 /** Queues `items` to resolve one at a time (one per `nextItem` call), then
  * resolves `null` ("nothing available") for every call after. */
 function queueItems(...items: (DueItem | null)[]) {
@@ -90,9 +98,54 @@ describe("StudyPage", () => {
     await user.click(screen.getByRole("button", { name: "Good" }));
 
     expect(await screen.findByText("cat")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
     // Promoting the buffered item plus refilling behind it: one more call.
     await waitFor(() => expect(api.study.nextItem).toHaveBeenCalledTimes(3));
+  });
+
+  it("does not pile up overlapping prefetch requests when rating faster than the prefetch resolves", async () => {
+    const user = userEvent.setup();
+    const a = item({ card_id: "a", prompt: "dog" });
+    const b = item({ card_id: "b", prompt: "cat" });
+    const mock = vi.mocked(api.study.nextItem);
+    const stalePrefetch = deferred<DueItem | null>();
+    mock.mockResolvedValueOnce(a); // current, on mount
+    mock.mockImplementationOnce(() => stalePrefetch.promise); // prefetch, held pending
+    vi.mocked(api.study.submitReview).mockResolvedValue({ milestone: null });
+    renderStudyPage();
+    await screen.findByText("dog");
+    await waitFor(() => expect(api.study.nextItem).toHaveBeenCalledTimes(2));
+
+    // Rate "a" while its prefetch (for whatever comes after it) is still
+    // unresolved — nothing is buffered yet, so this fetches "b" directly.
+    mock.mockResolvedValueOnce(b);
+    await user.click(screen.getByRole("button", { name: "Reveal" }));
+    await user.click(screen.getByRole("button", { name: "Good" }));
+    await screen.findByText("cat");
+
+    // A second advance has now happened with no prefetch buffered, but the
+    // original prefetch (still pending) must not have been joined by a
+    // second overlapping one on top of it.
+    expect(api.study.nextItem).toHaveBeenCalledTimes(3);
+
+    stalePrefetch.resolve(null);
+    await Promise.resolve();
+    expect(api.study.nextItem).toHaveBeenCalledTimes(3);
+  });
+
+  it("advances immediately without waiting for the review save to resolve", async () => {
+    const user = userEvent.setup();
+    const first = item({ card_id: "card-1", prompt: "dog" });
+    const second = item({ card_id: "card-2", prompt: "cat" });
+    queueItems(first, second);
+    // Never resolves — if advancing waited on this, "cat" would never appear.
+    vi.mocked(api.study.submitReview).mockReturnValue(new Promise(() => {}));
+    renderStudyPage();
+    await screen.findByText("dog");
+
+    await user.click(screen.getByRole("button", { name: "Reveal" }));
+    await user.click(screen.getByRole("button", { name: "Good" }));
+
+    expect(await screen.findByText("cat")).toBeInTheDocument();
   });
 
   it("shows the nothing-due message when nothing is available", async () => {
@@ -116,7 +169,7 @@ describe("StudyPage", () => {
     expect(await screen.findByText("dog")).toBeInTheDocument();
   });
 
-  it("shows the milestone interstitial before the next card, then advances on Continue", async () => {
+  it("shows the milestone as a dismissible overlay once the save resolves, without blocking advancement", async () => {
     const user = userEvent.setup();
     const first = item({ card_id: "card-1", prompt: "dog" });
     const second = item({ card_id: "card-2", prompt: "cat" });
@@ -128,12 +181,18 @@ describe("StudyPage", () => {
     await user.click(screen.getByRole("button", { name: "Reveal" }));
     await user.click(screen.getByRole("button", { name: "Good" }));
 
-    expect(await screen.findByText("5 new cards today — Good job")).toBeInTheDocument();
-    expect(screen.queryByText("cat")).not.toBeInTheDocument();
+    // Already advanced to the next card before the save even resolves.
+    expect(await screen.findByText("cat")).toBeInTheDocument();
+    // The milestone pops in as an overlay once the response arrives.
+    expect(await screen.findByText("5 new cards today")).toBeInTheDocument();
+    expect(screen.getByText("Good job")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
-    expect(await screen.findByText("cat")).toBeInTheDocument();
+    expect(screen.queryByText("5 new cards today")).not.toBeInTheDocument();
+    expect(screen.getByText("cat")).toBeInTheDocument();
+    // Dismissing the overlay doesn't trigger another fetch.
+    await waitFor(() => expect(api.study.nextItem).toHaveBeenCalledTimes(3));
   });
 
   it.each([
@@ -153,7 +212,8 @@ describe("StudyPage", () => {
     await user.click(screen.getByRole("button", { name: "Reveal" }));
     await user.click(screen.getByRole("button", { name: "Good" }));
 
-    expect(await screen.findByText(`${count} new cards today — ${text}`)).toBeInTheDocument();
+    expect(await screen.findByText(`${count} new cards today`)).toBeInTheDocument();
+    expect(screen.getByText(text)).toBeInTheDocument();
   });
 
   it("shows a save-failed banner but still advances when submitReview rejects", async () => {
@@ -170,7 +230,7 @@ describe("StudyPage", () => {
 
     expect(await screen.findByText("cat")).toBeInTheDocument();
     expect(
-      screen.getByText("Couldn't save your last rating — it may need to be repeated."),
+      await screen.findByText("Couldn't save your last rating — it may need to be repeated."),
     ).toBeInTheDocument();
   });
 });
