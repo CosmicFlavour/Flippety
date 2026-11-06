@@ -212,8 +212,19 @@ pub struct NewCardCandidate {
     pub directions: Vec<Direction>,
 }
 
-/// New-card candidates for `deck_id`, one row per card, pre-sorted
-/// `level ASC, created_at ASC`. Fine-grained shuffling happens in
+/// How many candidate rows `new_card_candidates` pulls in, at most. Only one
+/// candidate is ever actually introduced per call, so without a cap, a deck
+/// with thousands of still-unintroduced cards would make every single call
+/// fetch and shuffle its *entire* remaining pool just to throw almost all of
+/// it away — work that's repeated, barely-shrinking, on every single new
+/// card introduced. 50 rows (so ~25 bidirectional cards) is large enough to
+/// still feel unpredictable card-to-card, small enough to make this a
+/// non-issue regardless of deck size.
+const NEW_CANDIDATE_WINDOW: i64 = 50;
+
+/// Up to `NEW_CANDIDATE_WINDOW` new-card candidates for `deck_id`, pre-sorted
+/// `level ASC, created_at ASC` (so the window always starts from the
+/// lowest, earliest-due tier). Fine-grained shuffling happens in
 /// `commands::study`.
 ///
 /// A direction only counts as a candidate if it's still `New` *and*
@@ -235,7 +246,8 @@ pub fn new_card_candidates(
          JOIN review_state rs ON rs.card_id = c.id
          WHERE c.deck_id = ?1 AND rs.state = 'New' AND rs.due <= ?2
            AND (?3 IS NULL OR NOT (c.id = ?3 AND rs.direction = ?4))
-         ORDER BY c.level ASC, c.created_at ASC",
+         ORDER BY c.level ASC, c.created_at ASC
+         LIMIT ?5",
     )?;
     let rows = stmt
         .query_map(
@@ -243,7 +255,8 @@ pub fn new_card_candidates(
                 deck_id,
                 now,
                 exclude.map(|e| e.card_id.as_str()),
-                exclude.map(|e| e.direction.as_str())
+                exclude.map(|e| e.direction.as_str()),
+                NEW_CANDIDATE_WINDOW,
             ],
             |row| {
                 let direction: String = row.get("direction")?;
@@ -256,18 +269,27 @@ pub fn new_card_candidates(
         )?
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Grouped via an index map (not a linear scan per row) so this stays
+    // O(rows) rather than O(rows²) — the row count here is every still-New
+    // direction across the whole deck, which for a large imported deck
+    // (thousands of cards) made a per-row linear scan measurably slow.
     let mut candidates: Vec<NewCardCandidate> = Vec::new();
+    let mut index_by_card_id: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for (card_id, level, direction) in rows {
         let Some(direction) = Direction::parse(&direction) else {
             continue;
         };
-        match candidates.iter_mut().find(|c| c.card_id == card_id) {
-            Some(existing) => existing.directions.push(direction),
-            None => candidates.push(NewCardCandidate {
-                card_id,
-                level,
-                directions: vec![direction],
-            }),
+        match index_by_card_id.get(&card_id) {
+            Some(&i) => candidates[i].directions.push(direction),
+            None => {
+                index_by_card_id.insert(card_id.clone(), candidates.len());
+                candidates.push(NewCardCandidate {
+                    card_id,
+                    level,
+                    directions: vec![direction],
+                });
+            }
         }
     }
     Ok(candidates)
@@ -472,5 +494,92 @@ mod tests {
 
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].full.title, "in a");
+    }
+
+    fn new_bidirectional_card(conn: &Connection, deck_id: &str, level: i64) -> Card {
+        let now = Utc::now();
+        let card = Card {
+            id: Uuid::new_v4().to_string(),
+            deck_id: deck_id.to_string(),
+            face_1: "front".into(),
+            face_2: "back".into(),
+            full: CardFull {
+                title: String::new(),
+                subtitle: String::new(),
+                body: String::new(),
+                foot: String::new(),
+            },
+            tags: vec![],
+            directions: Direction::all().to_vec(),
+            level,
+            created_at: now,
+            updated_at: now,
+        };
+        insert(conn, &card).unwrap();
+        let fsrs_state = crate::srs::new_card_state(now);
+        for direction in Direction::all() {
+            crate::db::review_state::seed(conn, &card.id, direction, &fsrs_state).unwrap();
+        }
+        card
+    }
+
+    #[test]
+    fn new_card_candidates_groups_both_directions_of_the_same_card_together() {
+        let conn = db::test_connection();
+        let deck_id = seeded_deck(&conn);
+        let a = new_bidirectional_card(&conn, &deck_id, 1);
+        let b = new_bidirectional_card(&conn, &deck_id, 1);
+
+        let candidates = new_card_candidates(&conn, &deck_id, Utc::now(), None).unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        for candidate in &candidates {
+            assert!(candidate.card_id == a.id || candidate.card_id == b.id);
+            assert_eq!(candidate.directions.len(), 2);
+        }
+    }
+
+    /// Regression test: the grouping step used to do a linear scan per row
+    /// to find a candidate's existing entry, making the whole function
+    /// O(rows²). That was unnoticeable at the small scale other tests use,
+    /// but took multiple seconds on a deck with a few thousand still-new
+    /// cards (a real deck someone hit this with). This asserts a pool large
+    /// enough that the old O(n²) behavior would be unmistakable (multiple
+    /// seconds) while the O(n) grouping comfortably finishes in well under
+    /// the bound below.
+    #[test]
+    fn new_card_candidates_does_not_degrade_quadratically_with_a_large_pool() {
+        let conn = db::test_connection();
+        let deck_id = seeded_deck(&conn);
+        for _ in 0..9000 {
+            new_bidirectional_card(&conn, &deck_id, 1);
+        }
+
+        let t = std::time::Instant::now();
+        let candidates = new_card_candidates(&conn, &deck_id, Utc::now(), None).unwrap();
+        let elapsed = t.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "new_card_candidates took {elapsed:?} for a 9000-candidate pool — looks quadratic again",
+        );
+        assert!(
+            !candidates.is_empty() && candidates.len() <= NEW_CANDIDATE_WINDOW as usize,
+            "expected a bounded window of candidates regardless of pool size, got {}",
+            candidates.len(),
+        );
+    }
+
+    #[test]
+    fn new_card_candidates_caps_the_window_rather_than_returning_the_whole_pool() {
+        let conn = db::test_connection();
+        let deck_id = seeded_deck(&conn);
+        for _ in 0..(NEW_CANDIDATE_WINDOW * 2) {
+            new_bidirectional_card(&conn, &deck_id, 1);
+        }
+
+        let candidates = new_card_candidates(&conn, &deck_id, Utc::now(), None).unwrap();
+
+        assert!(candidates.len() as i64 <= NEW_CANDIDATE_WINDOW);
     }
 }
