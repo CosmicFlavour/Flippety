@@ -9,7 +9,6 @@ import type {
   NewCard,
   NewDeck,
   SubmitReviewInput,
-  SubmitReviewResult,
   UpdateCard,
   UpdateDeck,
 } from "@/types/models";
@@ -44,8 +43,7 @@ export const api = {
   study: {
     nextItem: (deckId: string | null, exclude?: { card_id: string; direction: Direction }) =>
       invoke<DueItem | null>("get_next_study_item", { deckId, exclude }),
-    submitReview: (input: SubmitReviewInput) =>
-      invoke<SubmitReviewResult>("submit_review", { input }),
+    submitReview: (input: SubmitReviewInput) => invoke<void>("submit_review", { input }),
   },
   importExport: {
     // Returns/takes file *content*, not a path — writing/reading the file

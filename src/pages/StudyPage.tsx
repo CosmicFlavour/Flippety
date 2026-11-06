@@ -5,32 +5,8 @@ import { api } from "@/lib/api";
 import type { Deck, Direction, DueItem, Rating } from "@/types/models";
 import { Button } from "@/components/ui/button";
 import { Card as UiCard, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
 
 const RATINGS: Rating[] = ["Again", "Hard", "Good", "Easy"];
-
-// Non-blocking encouragement/pacing copy, keyed by the deck's running count
-// of new cards introduced today (see SubmitReviewResult.milestone) — the
-// backend only decides *whether* a milestone fired (every multiple of 5);
-// what it says is presentation, so it lives here. Descending thresholds
-// mean any count past 25 naturally keeps the last tier's copy.
-const MILESTONE_TIERS: { threshold: number; text: string }[] = [
-  { threshold: 25, text: "That's probably too much" },
-  { threshold: 20, text: "Maybe take a break" },
-  { threshold: 15, text: "Going strong" },
-  { threshold: 10, text: "On a streak!" },
-  { threshold: 5, text: "Good job" },
-];
-
-function milestoneCopy(count: number): string {
-  return MILESTONE_TIERS.find((tier) => count >= tier.threshold)?.text ?? "Good job";
-}
 
 type View =
   | { kind: "loading" }
@@ -61,10 +37,6 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
   const [prefetched, setPrefetched] = useState<DueItem | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [studiedCount, setStudiedCount] = useState(0);
-  // Shown as a dismissible overlay on top of whatever `view` currently is —
-  // independent of it, since the milestone arrives asynchronously (see
-  // `rate` below) and shouldn't hold up advancing to the next card.
-  const [milestone, setMilestone] = useState<number | null>(null);
   // Guards the background prefetch so at most one is ever in flight. Rating
   // faster than a prefetch resolves means `prefetched` is still null on the
   // next rate — without this guard, every one of those would fire another
@@ -126,20 +98,13 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
   });
 
   // Optimistic: the next card shows immediately on click, without waiting
-  // on the round-trip — the review is persisted in the background, and if
-  // it happens to land on a milestone, that pops in as an overlay as soon
-  // as the response arrives rather than gating the next card on it.
+  // on the round-trip — the review is persisted in the background.
   const rate = (rating: Rating) => {
     if (view.kind !== "item") return;
     const item = view.item;
     submitReview.mutate(
       { card_id: item.card_id, direction: item.direction, rating },
-      {
-        onSuccess: (result) => {
-          setStudiedCount((c) => c + 1);
-          if (result.milestone != null) setMilestone(result.milestone);
-        },
-      },
+      { onSuccess: () => setStudiedCount((c) => c + 1) },
     );
     void advanceToNext();
   };
@@ -151,20 +116,6 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
       </Button>
       <h1 className="text-xl font-semibold">{deck.name}</h1>
     </div>
-  );
-
-  const milestoneOverlay = (
-    <Dialog open={milestone != null} onOpenChange={(open) => !open && setMilestone(null)}>
-      <DialogContent showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>{milestone} new cards today</DialogTitle>
-        </DialogHeader>
-        <p className="text-muted-foreground">{milestone != null && milestoneCopy(milestone)}</p>
-        <DialogFooter>
-          <Button onClick={() => setMilestone(null)}>Continue</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 
   let body: ReactNode;
@@ -242,7 +193,6 @@ export function StudyPage({ deck, onBack }: { deck: Deck; onBack: () => void }) 
     <div className="mx-auto flex max-w-xl flex-col gap-4 p-6">
       {header}
       {body}
-      {milestoneOverlay}
     </div>
   );
 }

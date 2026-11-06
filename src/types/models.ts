@@ -90,10 +90,4 @@ export interface SubmitReviewInput {
   rating: Rating;
 }
 
-export interface SubmitReviewResult {
-  /** Present only when this review was a card's first in this direction and
-   * the deck's local-day new-card count landed on a multiple of 5. */
-  milestone: number | null;
-}
-
 export type ImportMode = { mode: "new" } | { mode: "merge"; deck_id: string };

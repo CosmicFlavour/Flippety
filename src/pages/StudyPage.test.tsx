@@ -88,7 +88,7 @@ describe("StudyPage", () => {
     const first = item({ card_id: "card-1", prompt: "dog" });
     const second = item({ card_id: "card-2", prompt: "cat" });
     queueItems(first, second);
-    vi.mocked(api.study.submitReview).mockResolvedValue({ milestone: null });
+    vi.mocked(api.study.submitReview).mockResolvedValue(undefined);
     renderStudyPage();
     await screen.findByText("dog");
     // current + the one-ahead prefetch, both fired on mount.
@@ -110,7 +110,7 @@ describe("StudyPage", () => {
     const stalePrefetch = deferred<DueItem | null>();
     mock.mockResolvedValueOnce(a); // current, on mount
     mock.mockImplementationOnce(() => stalePrefetch.promise); // prefetch, held pending
-    vi.mocked(api.study.submitReview).mockResolvedValue({ milestone: null });
+    vi.mocked(api.study.submitReview).mockResolvedValue(undefined);
     renderStudyPage();
     await screen.findByText("dog");
     await waitFor(() => expect(api.study.nextItem).toHaveBeenCalledTimes(2));
@@ -169,51 +169,19 @@ describe("StudyPage", () => {
     expect(await screen.findByText("dog")).toBeInTheDocument();
   });
 
-  it("shows the milestone as a dismissible overlay once the save resolves, without blocking advancement", async () => {
+  it("counts a successful rating toward the session total", async () => {
     const user = userEvent.setup();
     const first = item({ card_id: "card-1", prompt: "dog" });
     const second = item({ card_id: "card-2", prompt: "cat" });
     queueItems(first, second);
-    vi.mocked(api.study.submitReview).mockResolvedValue({ milestone: 5 });
+    vi.mocked(api.study.submitReview).mockResolvedValue(undefined);
     renderStudyPage();
     await screen.findByText("dog");
 
     await user.click(screen.getByRole("button", { name: "Reveal" }));
     await user.click(screen.getByRole("button", { name: "Good" }));
 
-    // Already advanced to the next card before the save even resolves.
-    expect(await screen.findByText("cat")).toBeInTheDocument();
-    // The milestone pops in as an overlay once the response arrives.
-    expect(await screen.findByText("5 new cards today")).toBeInTheDocument();
-    expect(screen.getByText("Good job")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-
-    expect(screen.queryByText("5 new cards today")).not.toBeInTheDocument();
-    expect(screen.getByText("cat")).toBeInTheDocument();
-    // Dismissing the overlay doesn't trigger another fetch.
-    await waitFor(() => expect(api.study.nextItem).toHaveBeenCalledTimes(3));
-  });
-
-  it.each([
-    [5, "Good job"],
-    [10, "On a streak!"],
-    [15, "Going strong"],
-    [20, "Maybe take a break"],
-    [25, "That's probably too much"],
-    [30, "That's probably too much"],
-  ])("maps a milestone of %i to %s", async (count, text) => {
-    const user = userEvent.setup();
-    queueItems(item());
-    vi.mocked(api.study.submitReview).mockResolvedValue({ milestone: count });
-    renderStudyPage();
-    await screen.findByText("dog");
-
-    await user.click(screen.getByRole("button", { name: "Reveal" }));
-    await user.click(screen.getByRole("button", { name: "Good" }));
-
-    expect(await screen.findByText(`${count} new cards today`)).toBeInTheDocument();
-    expect(screen.getByText(text)).toBeInTheDocument();
+    expect(await screen.findByText("1 studied this session")).toBeInTheDocument();
   });
 
   it("shows a save-failed banner but still advances when submitReview rejects", async () => {
