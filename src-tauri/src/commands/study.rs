@@ -170,19 +170,7 @@ pub struct SubmitReviewInput {
     pub rating: Rating,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SubmitReviewResult {
-    /// Set only when this review was a card's first-ever review in this
-    /// direction AND the deck's local-day new-card count landed on a
-    /// multiple of 5 as a result — the count itself, for the frontend to
-    /// map to copy.
-    pub milestone: Option<i64>,
-}
-
-fn submit_review_inner(
-    conn: &Connection,
-    input: SubmitReviewInput,
-) -> AppResult<SubmitReviewResult> {
+fn submit_review_inner(conn: &Connection, input: SubmitReviewInput) -> AppResult<()> {
     let now = Utc::now();
 
     let current =
@@ -192,7 +180,6 @@ fn submit_review_inner(
                 input.card_id, input.direction
             ))
         })?;
-    let was_first_review = current.reps == 0;
 
     let scheduling = crate::srs::review(current, now, input.rating);
     db::review_state::upsert(conn, &input.card_id, input.direction, &scheduling.card)?;
@@ -202,24 +189,11 @@ fn submit_review_inner(
         input.direction,
         &scheduling.review_log,
     )?;
-
-    let milestone = if was_first_review {
-        let card = db::cards::get(conn, &input.card_id)?
-            .ok_or_else(|| AppError::NotFound(format!("card {}", input.card_id)))?;
-        let count = db::review_state::new_cards_introduced_today(conn, &card.deck_id, now)?;
-        (count > 0 && count % 5 == 0).then_some(count)
-    } else {
-        None
-    };
-
-    Ok(SubmitReviewResult { milestone })
+    Ok(())
 }
 
 #[tauri::command]
-pub fn submit_review(
-    state: State<AppState>,
-    input: SubmitReviewInput,
-) -> AppResult<SubmitReviewResult> {
+pub fn submit_review(state: State<AppState>, input: SubmitReviewInput) -> AppResult<()> {
     let conn = state.conn();
     submit_review_inner(&conn, input)
 }
@@ -602,90 +576,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
-    }
-
-    #[test]
-    fn submit_review_reports_a_milestone_on_every_5th_new_card_introduced_today() {
-        let conn = db::test_connection();
-        let deck = new_deck(&conn, "Deck");
-        let mut last_milestone = None;
-        for _ in 0..5 {
-            let card = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
-            last_milestone = submit_review_inner(
-                &conn,
-                SubmitReviewInput {
-                    card_id: card.id,
-                    direction: Direction::FaceOneToTwo,
-                    rating: Rating::Good,
-                },
-            )
-            .unwrap()
-            .milestone;
-        }
-
-        assert_eq!(last_milestone, Some(5));
-    }
-
-    #[test]
-    fn submit_review_reports_no_milestone_when_the_count_is_not_a_multiple_of_5() {
-        let conn = db::test_connection();
-        let deck = new_deck(&conn, "Deck");
-        let card = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
-
-        let result = submit_review_inner(
-            &conn,
-            SubmitReviewInput {
-                card_id: card.id,
-                direction: Direction::FaceOneToTwo,
-                rating: Rating::Good,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(result.milestone, None);
-    }
-
-    #[test]
-    fn submit_review_reports_no_milestone_for_a_reviews_that_isnt_a_cards_first() {
-        let conn = db::test_connection();
-        let deck = new_deck(&conn, "Deck");
-        // Four cards introduced already today, landing exactly on the cap
-        // of what the 5th would need — reviewing a 5th time on an
-        // *already-introduced* card must not retrigger the milestone.
-        for _ in 0..4 {
-            let card = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
-            submit_review_inner(
-                &conn,
-                SubmitReviewInput {
-                    card_id: card.id,
-                    direction: Direction::FaceOneToTwo,
-                    rating: Rating::Good,
-                },
-            )
-            .unwrap();
-        }
-        let already_introduced = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
-        submit_review_inner(
-            &conn,
-            SubmitReviewInput {
-                card_id: already_introduced.id.clone(),
-                direction: Direction::FaceOneToTwo,
-                rating: Rating::Good,
-            },
-        )
-        .unwrap();
-
-        let result = submit_review_inner(
-            &conn,
-            SubmitReviewInput {
-                card_id: already_introduced.id,
-                direction: Direction::FaceOneToTwo,
-                rating: Rating::Good,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(result.milestone, None);
     }
 
     #[test]

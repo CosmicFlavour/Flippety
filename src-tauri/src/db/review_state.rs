@@ -247,25 +247,6 @@ pub fn due_review_items(
         .collect())
 }
 
-/// Count of distinct cards in `deck_id` whose first-ever review happened on
-/// the same *local* calendar day as `now` — feeds the milestone count
-/// surfaced after a card's first review (see `commands::study::submit_review`).
-pub fn new_cards_introduced_today(
-    conn: &Connection,
-    deck_id: &str,
-    now: DateTime<Utc>,
-) -> AppResult<i64> {
-    conn.query_row(
-        "SELECT COUNT(DISTINCT rs.card_id) FROM review_state rs
-         JOIN cards c ON c.id = rs.card_id
-         WHERE c.deck_id = ?1 AND rs.reps = 1
-           AND date(rs.last_review, 'localtime') = date(?2, 'localtime')",
-        params![deck_id, now],
-        |row| row.get(0),
-    )
-    .map_err(Into::into)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,52 +529,5 @@ mod tests {
                 (card_b.id.clone(), Direction::FaceOneToTwo),
             ]
         );
-    }
-
-    #[test]
-    fn new_cards_introduced_today_counts_distinct_cards_not_items() {
-        let conn = db::test_connection();
-        let deck = new_deck(&conn, "Deck");
-        let card = new_card(&conn, &deck.id);
-        let now = Utc::now();
-        // Both directions of the same card reviewed for the first time today.
-        seed_reviewed(&conn, &card.id, Direction::FaceOneToTwo, now);
-        seed_reviewed(&conn, &card.id, Direction::FaceTwoToOne, now);
-
-        let count = new_cards_introduced_today(&conn, &deck.id, now).unwrap();
-
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn new_cards_introduced_today_ignores_cards_reviewed_on_a_previous_day() {
-        let conn = db::test_connection();
-        let deck = new_deck(&conn, "Deck");
-        let card = new_card(&conn, &deck.id);
-        let now = Utc::now();
-        seed_reviewed(
-            &conn,
-            &card.id,
-            Direction::FaceOneToTwo,
-            now - Duration::days(1),
-        );
-
-        let count = new_cards_introduced_today(&conn, &deck.id, now).unwrap();
-
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn new_cards_introduced_today_ignores_cards_never_reviewed() {
-        let conn = db::test_connection();
-        let deck = new_deck(&conn, "Deck");
-        let card = new_card(&conn, &deck.id);
-        let now = Utc::now();
-        let due_state = crate::srs::new_card_state(now);
-        seed(&conn, &card.id, Direction::FaceOneToTwo, &due_state).unwrap();
-
-        let count = new_cards_introduced_today(&conn, &deck.id, now).unwrap();
-
-        assert_eq!(count, 0);
     }
 }
