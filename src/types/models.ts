@@ -91,3 +91,16 @@ export interface SubmitReviewInput {
 }
 
 export type ImportMode = { mode: "new" } | { mode: "merge"; deck_id: string };
+
+export interface RatingCounts {
+  again: number;
+  hard: number;
+  good: number;
+  easy: number;
+}
+
+export interface DeckStats {
+  total_cards: number;
+  introduced_cards: number;
+  ratings: RatingCounts;
+}

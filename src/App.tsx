@@ -3,12 +3,14 @@ import type { Deck } from "@/types/models";
 import { DecksPage } from "@/pages/DecksPage";
 import { CardsPage } from "@/pages/CardsPage";
 import { StudyPage } from "@/pages/StudyPage";
+import { StatsPage } from "@/pages/StatsPage";
 import { SettingsDialog } from "@/components/SettingsDialog";
 
 type View =
   | { name: "decks" }
   | { name: "cards"; deck: Deck }
-  | { name: "study"; deck: Deck; from: "decks" | "cards" };
+  | { name: "study"; deck: Deck; from: "decks" | "cards" }
+  | { name: "stats"; deck: Deck };
 
 function App() {
   const [view, setView] = useState<View>({ name: "decks" });
@@ -36,10 +38,14 @@ function App() {
             }
           />
         )}
+        {view.name === "stats" && (
+          <StatsPage deck={view.deck} onBack={() => setView({ name: "decks" })} />
+        )}
         {view.name === "decks" && (
           <DecksPage
             onStudyDeck={(deck) => setView({ name: "study", deck, from: "decks" })}
             onBrowseDeck={(deck) => setView({ name: "cards", deck })}
+            onStatsDeck={(deck) => setView({ name: "stats", deck })}
           />
         )}
       </div>
