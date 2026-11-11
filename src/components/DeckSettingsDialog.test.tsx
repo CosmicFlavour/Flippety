@@ -13,7 +13,7 @@ const DECK: Deck = {
   id: "deck-1",
   name: "Chinese HSK1",
   description: "Vocab deck",
-  new_cards_per_day: 20,
+  intro_direction: "2->1",
   created_at: "",
   updated_at: "",
 };
@@ -39,12 +39,12 @@ describe("DeckSettingsDialog", () => {
     vi.mocked(exportDeckToFile).mockReset();
   });
 
-  it("pre-fills the deck's name, description, and new cards per day", async () => {
+  it("pre-fills the deck's name, description, and intro direction", async () => {
     await openDialog();
 
     expect(screen.getByLabelText("Name")).toHaveValue("Chinese HSK1");
     expect(screen.getByLabelText("Description")).toHaveValue("Vocab deck");
-    expect(screen.getByLabelText("New cards per day")).toHaveValue(20);
+    expect(screen.getByLabelText("Face 2 → Face 1")).toBeChecked();
   });
 
   it("saves the edited values", async () => {
@@ -57,7 +57,20 @@ describe("DeckSettingsDialog", () => {
     expect(onSave).toHaveBeenCalledWith({
       name: "Renamed deck",
       description: "Vocab deck",
-      new_cards_per_day: 20,
+      intro_direction: "2->1",
+    });
+  });
+
+  it("saves a newly selected intro direction", async () => {
+    const { user, onSave } = await openDialog();
+
+    await user.click(screen.getByLabelText("Face 1 → Face 2"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      name: "Chinese HSK1",
+      description: "Vocab deck",
+      intro_direction: "1->2",
     });
   });
 

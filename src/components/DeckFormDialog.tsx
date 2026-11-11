@@ -1,9 +1,9 @@
 import { useState, type ReactElement } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { NumberInput } from "@/components/ui/number-input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import type { Direction } from "@/types/models";
 import {
   Dialog,
   DialogContent,
@@ -16,10 +16,10 @@ import {
 export interface DeckFormValues {
   name: string;
   description: string | null;
-  new_cards_per_day: number | null;
+  intro_direction: Direction;
 }
 
-const BLANK_VALUES: DeckFormValues = { name: "", description: "", new_cards_per_day: null };
+const BLANK_VALUES: DeckFormValues = { name: "", description: "", intro_direction: "1->2" };
 
 export function DeckFormDialog({
   trigger,
@@ -39,7 +39,7 @@ export function DeckFormDialog({
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [newCardsPerDayText, setNewCardsPerDayText] = useState("");
+  const [introDirection, setIntroDirection] = useState<Direction>("1->2");
 
   const handleOpenChange = (next: boolean) => {
     setOpen(next);
@@ -48,18 +48,17 @@ export function DeckFormDialog({
     const values = initialValues ?? BLANK_VALUES;
     setName(values.name);
     setDescription(values.description ?? "");
-    setNewCardsPerDayText(values.new_cards_per_day?.toString() ?? "");
+    setIntroDirection(values.intro_direction);
   };
 
   const handleSubmit = async () => {
     setSubmitting(true);
     setError(null);
     try {
-      const trimmed = newCardsPerDayText.trim();
       await onSubmit({
         name,
         description: description || null,
-        new_cards_per_day: trimmed === "" ? null : Math.max(0, Number(trimmed) || 0),
+        intro_direction: introDirection,
       });
       setOpen(false);
     } catch (err) {
@@ -90,14 +89,27 @@ export function DeckFormDialog({
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="deck-new-cards-per-day">New cards per day</Label>
-            <NumberInput
-              id="deck-new-cards-per-day"
-              min={0}
-              placeholder="Unlimited"
-              value={newCardsPerDayText}
-              onValueChange={setNewCardsPerDayText}
-            />
+            <Label>First direction introduced</Label>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-1.5 text-sm">
+                <input
+                  type="radio"
+                  name="deck-form-intro-direction"
+                  checked={introDirection === "1->2"}
+                  onChange={() => setIntroDirection("1->2")}
+                />
+                Face 1 → Face 2
+              </label>
+              <label className="flex items-center gap-1.5 text-sm">
+                <input
+                  type="radio"
+                  name="deck-form-intro-direction"
+                  checked={introDirection === "2->1"}
+                  onChange={() => setIntroDirection("2->1")}
+                />
+                Face 2 → Face 1
+              </label>
+            </div>
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>

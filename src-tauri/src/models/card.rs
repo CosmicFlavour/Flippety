@@ -42,6 +42,23 @@ pub fn default_level() -> i64 {
     1
 }
 
+/// New decks default to introducing face 1 before face 2 for a
+/// two-direction card, matching the historical de-facto order (directions
+/// were always stored/iterated face1-before-face2).
+pub fn default_intro_direction() -> Direction {
+    Direction::FaceOneToTwo
+}
+
+/// A specific card+direction pair to exclude from `db::review_state::due_review_items`
+/// or `db::cards::new_card_candidates` — used so prefetching the item after
+/// the one already on screen can't return that same item again, since
+/// nothing in the DB changes between "show an item" and "submit its review."
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExcludeItem {
+    pub card_id: String,
+    pub direction: Direction,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardFull {
     pub title: String,

@@ -5,10 +5,13 @@ use std::path::Path;
 pub mod cards;
 pub mod decks;
 pub mod review_state;
+pub mod stats;
 
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_leveling.sql"),
+    include_str!("migrations/0003_intro_direction.sql"),
+    include_str!("migrations/0004_review_state_state_due_index.sql"),
 ];
 
 pub fn open(db_path: &Path) -> AppResult<Connection> {

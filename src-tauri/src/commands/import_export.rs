@@ -1,7 +1,9 @@
 use super::AppState;
 use crate::db;
 use crate::error::{AppError, AppResult};
-use crate::models::card::{default_directions, default_level, Card, CardFull, Direction};
+use crate::models::card::{
+    default_directions, default_intro_direction, default_level, Card, CardFull, Direction,
+};
 use crate::models::deck::Deck;
 use chrono::Utc;
 use rusqlite::Connection;
@@ -129,7 +131,7 @@ fn import_deck_json(conn: &mut Connection, raw: &str, mode: ImportMode) -> AppRe
                 id: Uuid::new_v4().to_string(),
                 name,
                 description: parsed.deck.description,
-                new_cards_per_day: None,
+                intro_direction: default_intro_direction(),
                 created_at: now,
                 updated_at: now,
             };

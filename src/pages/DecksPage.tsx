@@ -1,4 +1,4 @@
-import { Layers, Settings } from "lucide-react";
+import { ChartPie, Layers, Settings } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type { Deck } from "@/types/models";
@@ -17,9 +17,11 @@ import { ImportDeckDialog } from "@/components/ImportDeckDialog";
 export function DecksPage({
   onStudyDeck,
   onBrowseDeck,
+  onStatsDeck,
 }: {
   onStudyDeck: (deck: Deck) => void;
   onBrowseDeck: (deck: Deck) => void;
+  onStatsDeck: (deck: Deck) => void;
 }) {
   const queryClient = useQueryClient();
   const decksQuery = useQuery({ queryKey: ["decks"], queryFn: api.decks.list });
@@ -96,6 +98,14 @@ export function DecksPage({
                   onClick={() => onBrowseDeck(deck)}
                 >
                   <Layers className="size-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Deck stats"
+                  onClick={() => onStatsDeck(deck)}
+                >
+                  <ChartPie className="size-3.5" />
                 </Button>
               </CardAction>
             </CardHeader>

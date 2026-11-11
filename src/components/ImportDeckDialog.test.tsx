@@ -23,7 +23,7 @@ const EXISTING_DECK: Deck = {
   id: "deck-1",
   name: "Demo Deck",
   description: null,
-  new_cards_per_day: null,
+  intro_direction: "1->2",
   created_at: "",
   updated_at: "",
 };
@@ -32,7 +32,7 @@ const IMPORTED_DECK: Deck = {
   id: "deck-2",
   name: "Imported Deck",
   description: null,
-  new_cards_per_day: null,
+  intro_direction: "1->2",
   created_at: "",
   updated_at: "",
 };

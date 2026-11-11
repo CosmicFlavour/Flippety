@@ -32,28 +32,18 @@ describe("DeckFormDialog", () => {
     expect(submit).toBeDisabled();
   });
 
-  it("pre-fills name, description, and new cards per day when editing", async () => {
+  it("pre-fills name, description, and intro direction when editing", async () => {
     const initialValues: DeckFormValues = {
       name: "Chinese HSK1",
       description: "Vocab deck",
-      new_cards_per_day: 20,
+      intro_direction: "2->1",
     };
     await openDialog({ title: "Edit deck", submitLabel: "Save", initialValues });
 
     expect(screen.getByLabelText("Name")).toHaveValue("Chinese HSK1");
     expect(screen.getByLabelText("Description")).toHaveValue("Vocab deck");
-    expect(screen.getByLabelText("New cards per day")).toHaveValue(20);
-  });
-
-  it("treats a null description and new_cards_per_day as empty fields", async () => {
-    await openDialog({
-      title: "Edit deck",
-      submitLabel: "Save",
-      initialValues: { name: "Chinese HSK1", description: null, new_cards_per_day: null },
-    });
-
-    expect(screen.getByLabelText("Description")).toHaveValue("");
-    expect(screen.getByLabelText("New cards per day")).toHaveValue(null);
+    expect(screen.getByLabelText("Face 2 → Face 1")).toBeChecked();
+    expect(screen.getByLabelText("Face 1 → Face 2")).not.toBeChecked();
   });
 
   it("submits the trimmed name and description, converting blanks to null", async () => {
@@ -65,22 +55,22 @@ describe("DeckFormDialog", () => {
     expect(onSubmit).toHaveBeenCalledWith({
       name: "Chinese HSK1",
       description: null,
-      new_cards_per_day: null,
+      intro_direction: "1->2",
     });
   });
 
-  it("submits a non-empty description and new cards per day as-is", async () => {
+  it("submits a non-empty description and the selected intro direction", async () => {
     const { user, onSubmit } = await openDialog();
     await user.type(screen.getByLabelText("Name"), "Chinese HSK1");
     await user.type(screen.getByLabelText("Description"), "Vocab deck");
-    await user.type(screen.getByLabelText("New cards per day"), "20");
+    await user.click(screen.getByLabelText("Face 2 → Face 1"));
 
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     expect(onSubmit).toHaveBeenCalledWith({
       name: "Chinese HSK1",
       description: "Vocab deck",
-      new_cards_per_day: 20,
+      intro_direction: "2->1",
     });
   });
 

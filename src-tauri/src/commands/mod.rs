@@ -4,6 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 pub mod cards;
 pub mod decks;
 pub mod import_export;
+pub mod stats;
 pub mod study;
 
 pub struct AppState {

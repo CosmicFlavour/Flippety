@@ -33,11 +33,12 @@ pub fn run() {
             commands::cards::create_card,
             commands::cards::update_card,
             commands::cards::delete_card,
-            commands::study::get_study_batch,
+            commands::study::get_next_study_item,
             commands::study::submit_review,
             commands::study::reset_card_progress,
             commands::import_export::export_deck,
             commands::import_export::import_deck,
+            commands::stats::get_deck_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

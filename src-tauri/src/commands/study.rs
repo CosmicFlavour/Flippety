@@ -2,8 +2,8 @@ use super::AppState;
 use crate::db;
 use crate::db::cards::NewCardCandidate;
 use crate::error::{AppError, AppResult};
-use crate::models::card::{CardFull, Direction};
-use chrono::Utc;
+use crate::models::card::{CardFull, Direction, ExcludeItem};
+use chrono::{DateTime, Utc};
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
 use rs_fsrs::Rating;
@@ -19,18 +19,6 @@ pub struct DueItem {
     pub direction: Direction,
     pub prompt: String,
     pub full: CardFull,
-}
-
-/// A batch of items to study right now, fetched fresh against live review
-/// state — see `get_study_batch_inner` for why "study session" isn't a
-/// fixed, precomputed set here.
-#[derive(Debug, Clone, Serialize)]
-pub struct StudyBatch {
-    pub items: Vec<DueItem>,
-    /// New-card items that exist beyond today's cap and so aren't in
-    /// `items` — lets the frontend offer "pull more new cards" once the cap
-    /// is reached, and size that offer.
-    pub bonus_new_available: i64,
 }
 
 fn hydrate(conn: &Connection, refs: Vec<(String, Direction)>) -> AppResult<Vec<DueItem>> {
@@ -55,9 +43,7 @@ fn hydrate(conn: &Connection, refs: Vec<(String, Direction)>) -> AppResult<Vec<D
 /// Every card in `deck_id` still awaiting its first review in at least one
 /// direction, in the order they'd be introduced: level-ascending (levels are
 /// a deliberate curriculum sequence, e.g. HSK1 before HSK2), fully shuffled
-/// *within* a level. No daily-cap truncation here — that's applied by the
-/// caller, since how much of this list is available depends on what's
-/// already been introduced today.
+/// *within* a level.
 ///
 /// Cards are intentionally *not* sub-clustered by tag/theme within a level:
 /// grouping similar material together ("blocked practice") is well-known to
@@ -67,9 +53,11 @@ fn hydrate(conn: &Connection, refs: Vec<(String, Direction)>) -> AppResult<Vec<D
 fn ordered_new_candidates(
     conn: &Connection,
     deck_id: &str,
+    now: DateTime<Utc>,
+    exclude: Option<&ExcludeItem>,
     rng: &mut ThreadRng,
 ) -> AppResult<Vec<NewCardCandidate>> {
-    let candidates = db::cards::new_card_candidates(conn, deck_id)?;
+    let candidates = db::cards::new_card_candidates(conn, deck_id, now, exclude)?;
 
     // Candidates arrive level-ascending; group consecutive same-level runs.
     let mut level_groups: Vec<Vec<NewCardCandidate>> = Vec::new();
@@ -88,107 +76,91 @@ fn ordered_new_candidates(
     Ok(ordered)
 }
 
-/// Takes candidate cards from the front of `candidates`, expanding each into
-/// its still-New directions, until at least `min_items` items have been
-/// collected. The card that crosses the threshold is included in full, so
-/// the result can overflow `min_items` by up to one card's worth of
-/// directions — cards are never split across that boundary, since once
-/// introduced the two directions are independently scheduled items anyway,
-/// so there's nothing to gain from forcing them into the same batch.
-fn take_new_items(candidates: &[NewCardCandidate], min_items: usize) -> Vec<(String, Direction)> {
-    let mut items = Vec::new();
-    for candidate in candidates {
-        if items.len() >= min_items {
-            break;
-        }
-        for direction in &candidate.directions {
-            items.push((candidate.card_id.clone(), *direction));
-        }
+/// Decides which of a new candidate's directions to introduce now. A
+/// single-direction candidate has nothing to stagger against. A
+/// two-direction candidate introduces the deck's configured
+/// `intro_direction` (or whichever direction is left, if that one was
+/// already introduced/staggered on a previous call) and pushes the other
+/// direction's `due` into the future, so both directions of the same new
+/// card can't surface in the same sitting.
+fn introduce_candidate(
+    conn: &Connection,
+    deck_id: &str,
+    candidate: &NewCardCandidate,
+    now: DateTime<Utc>,
+) -> AppResult<Direction> {
+    if candidate.directions.len() == 1 {
+        return Ok(candidate.directions[0]);
     }
-    items
+
+    let intro = db::decks::get(conn, deck_id)?
+        .ok_or_else(|| AppError::NotFound(format!("deck {deck_id}")))?
+        .intro_direction;
+    let (chosen, sibling) = if candidate.directions.contains(&intro) {
+        (
+            intro,
+            *candidate.directions.iter().find(|d| **d != intro).unwrap(),
+        )
+    } else {
+        // intro_direction's direction isn't a candidate here (already
+        // introduced/staggered previously) — introduce whichever's left.
+        (candidate.directions[0], candidate.directions[1])
+    };
+    db::review_state::defer_new_direction(conn, &candidate.card_id, sibling, now)?;
+    Ok(chosen)
 }
 
-/// The next batch of up to `limit` items to study right now: most-overdue
-/// reviews first, remaining slots filled with new cards (capped by the
-/// deck's `new_cards_per_day` unless `bypass_new_card_cap`), then the whole
-/// batch shuffled together — so a new card's two directions, or a review and
-/// a new card, don't land in a predictable order.
+/// The single next item to study right now for `deck_id` (or across all
+/// decks if `None`): the most-overdue pending review if one exists,
+/// otherwise the next new card to introduce (new-card introduction is
+/// inherently per-deck, so this step is skipped when `deck_id` is `None` —
+/// "everything due" mode has no UI yet), otherwise `None`.
 ///
-/// This is deliberately *not* a fixed "today's session" fetched once:
-/// FSRS reschedules items on short-term learning steps that can be due again
-/// within minutes, so there's no such thing as a stable daily set to
-/// precompute — every call reflects live review state, and the caller is
-/// expected to call this again (not reuse an old result) once its buffer
-/// runs low.
-fn get_study_batch_inner(
+/// `exclude` lets the caller ask for "the item after the one already on
+/// screen": nothing in the DB changes between showing an item and
+/// submitting its review, so without this, fetching one item ahead of an
+/// unanswered one would deterministically return that same item again.
+///
+/// Deliberately fetches one item at a time rather than a batch: FSRS can
+/// make an item due again within minutes (short-term learning steps), so
+/// there's no stable "today's batch" to precompute — every call reflects
+/// live review state.
+fn get_next_study_item_inner(
     conn: &Connection,
     deck_id: Option<&str>,
-    limit: i64,
-    bypass_new_card_cap: bool,
-) -> AppResult<StudyBatch> {
+    exclude: Option<ExcludeItem>,
+) -> AppResult<Option<DueItem>> {
     let now = Utc::now();
-    let limit = limit.max(0) as usize;
 
-    let mut due = db::review_state::due_review_items(conn, deck_id, now)?;
-    due.truncate(limit);
-    let remaining_slots = limit.saturating_sub(due.len());
+    let due = db::review_state::due_review_items(conn, deck_id, now, exclude.as_ref())?;
+    if let Some((card_id, direction)) = due.into_iter().next() {
+        return Ok(Some(hydrate(conn, vec![(card_id, direction)])?.remove(0)));
+    }
 
-    let mut rng = rand::thread_rng();
-    let (new_items, bonus_new_available) = match deck_id {
-        Some(deck_id) => {
-            let candidates = ordered_new_candidates(conn, deck_id, &mut rng)?;
-            let per_day_cap = db::decks::get(conn, deck_id)?
-                .ok_or_else(|| AppError::NotFound(format!("deck {deck_id}")))?
-                .new_cards_per_day;
-
-            let cards_under_cap = match per_day_cap {
-                Some(cap) => {
-                    let introduced_today =
-                        db::review_state::new_cards_introduced_today(conn, deck_id, now)?;
-                    ((cap - introduced_today).max(0) as usize).min(candidates.len())
-                }
-                None => candidates.len(),
-            };
-            let (under_cap, beyond_cap) = candidates.split_at(cards_under_cap);
-
-            let bonus_new_available: i64 = if per_day_cap.is_some() {
-                beyond_cap.iter().map(|c| c.directions.len() as i64).sum()
-            } else {
-                0
-            };
-
-            let pool: &[NewCardCandidate] = if bypass_new_card_cap {
-                &candidates
-            } else {
-                under_cap
-            };
-            (take_new_items(pool, remaining_slots), bonus_new_available)
-        }
-        // "Everything due" mode has no UI yet, so new-card introduction
-        // (inherently per-deck) doesn't apply here.
-        None => (Vec::new(), 0),
+    let Some(deck_id) = deck_id else {
+        return Ok(None);
     };
 
-    let mut combined = due;
-    combined.extend(new_items);
-    combined.shuffle(&mut rng);
+    let mut rng = rand::thread_rng();
+    let candidates = ordered_new_candidates(conn, deck_id, now, exclude.as_ref(), &mut rng)?;
+    let Some(candidate) = candidates.into_iter().next() else {
+        return Ok(None);
+    };
 
-    let items = hydrate(conn, combined)?;
-    Ok(StudyBatch {
-        items,
-        bonus_new_available,
-    })
+    let direction = introduce_candidate(conn, deck_id, &candidate, now)?;
+    Ok(Some(
+        hydrate(conn, vec![(candidate.card_id, direction)])?.remove(0),
+    ))
 }
 
 #[tauri::command]
-pub fn get_study_batch(
+pub fn get_next_study_item(
     state: State<AppState>,
     deck_id: Option<String>,
-    limit: i64,
-    bypass_new_card_cap: bool,
-) -> AppResult<StudyBatch> {
+    exclude: Option<ExcludeItem>,
+) -> AppResult<Option<DueItem>> {
     let conn = state.conn();
-    get_study_batch_inner(&conn, deck_id.as_deref(), limit, bypass_new_card_cap)
+    get_next_study_item_inner(&conn, deck_id.as_deref(), exclude)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,6 +223,7 @@ mod tests {
     use super::*;
     use crate::commands::decks::tests_support::new_deck;
     use crate::models::card::{Card, CardFull};
+    use chrono::Duration;
     use rs_fsrs::State;
     use uuid::Uuid;
 
@@ -280,222 +253,259 @@ mod tests {
         card
     }
 
+    /// Seeds a card+direction directly into the Review state with one rep
+    /// and the given `due`, as if it had already been reviewed once.
+    fn make_due_review(conn: &Connection, card_id: &str, direction: Direction, due: DateTime<Utc>) {
+        let mut fsrs_card = crate::srs::new_card_state(due);
+        fsrs_card.state = State::Review;
+        fsrs_card.reps = 1;
+        fsrs_card.due = due;
+        db::review_state::upsert(conn, card_id, direction, &fsrs_card).unwrap();
+    }
+
     #[test]
-    fn get_study_batch_prompts_face_1_for_the_1_to_2_direction() {
+    fn get_next_study_item_prompts_face_1_for_the_1_to_2_direction() {
         let conn = db::test_connection();
         let deck = new_deck(&conn, "Deck");
         let card = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
 
-        let batch = get_study_batch_inner(&conn, Some(&deck.id), 10, false).unwrap();
+        let item = get_next_study_item_inner(&conn, Some(&deck.id), None)
+            .unwrap()
+            .unwrap();
 
-        assert_eq!(batch.items.len(), 1);
-        assert_eq!(batch.items[0].card_id, card.id);
-        assert_eq!(batch.items[0].direction, Direction::FaceOneToTwo);
-        assert_eq!(batch.items[0].prompt, "dog");
-        assert_eq!(batch.items[0].full.title, "狗");
+        assert_eq!(item.card_id, card.id);
+        assert_eq!(item.direction, Direction::FaceOneToTwo);
+        assert_eq!(item.prompt, "dog");
+        assert_eq!(item.full.title, "狗");
     }
 
     #[test]
-    fn get_study_batch_prompts_face_2_for_the_2_to_1_direction() {
+    fn get_next_study_item_prompts_face_2_for_the_2_to_1_direction() {
         let conn = db::test_connection();
         let deck = new_deck(&conn, "Deck");
         new_card(&conn, &deck.id, vec![Direction::FaceTwoToOne], 1);
 
-        let batch = get_study_batch_inner(&conn, Some(&deck.id), 10, false).unwrap();
+        let item = get_next_study_item_inner(&conn, Some(&deck.id), None)
+            .unwrap()
+            .unwrap();
 
-        assert_eq!(batch.items.len(), 1);
-        assert_eq!(batch.items[0].direction, Direction::FaceTwoToOne);
-        assert_eq!(batch.items[0].prompt, "狗");
+        assert_eq!(item.direction, Direction::FaceTwoToOne);
+        assert_eq!(item.prompt, "狗");
     }
 
     #[test]
-    fn get_study_batch_filters_by_deck() {
+    fn get_next_study_item_filters_by_deck() {
         let conn = db::test_connection();
         let deck_a = new_deck(&conn, "Deck A");
         let deck_b = new_deck(&conn, "Deck B");
-        new_card(&conn, &deck_a.id, vec![Direction::FaceOneToTwo], 1);
+        let card_a = new_card(&conn, &deck_a.id, vec![Direction::FaceOneToTwo], 1);
         new_card(&conn, &deck_b.id, vec![Direction::FaceOneToTwo], 1);
 
-        let batch = get_study_batch_inner(&conn, Some(&deck_a.id), 10, false).unwrap();
+        let item = get_next_study_item_inner(&conn, Some(&deck_a.id), None)
+            .unwrap()
+            .unwrap();
 
-        assert_eq!(batch.items.len(), 1);
+        assert_eq!(item.card_id, card_a.id);
     }
 
     #[test]
-    fn get_study_batch_prioritizes_the_most_overdue_reviews_first() {
+    fn get_next_study_item_returns_none_when_nothing_available() {
+        let conn = db::test_connection();
+        let deck = new_deck(&conn, "Deck");
+
+        let item = get_next_study_item_inner(&conn, Some(&deck.id), None).unwrap();
+
+        assert!(item.is_none());
+    }
+
+    #[test]
+    fn get_next_study_item_returns_the_most_overdue_review() {
         let conn = db::test_connection();
         let deck = new_deck(&conn, "Deck");
         let now = Utc::now();
-        let mut cards = Vec::new();
-        for i in 0..5 {
-            let card = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
-            let mut fsrs_card = crate::srs::new_card_state(now);
-            fsrs_card.state = State::Review;
-            fsrs_card.reps = 1;
-            fsrs_card.due = now - chrono::Duration::days(i + 1);
-            db::review_state::upsert(&conn, &card.id, Direction::FaceOneToTwo, &fsrs_card).unwrap();
-            cards.push(card);
-        }
-        // cards[4] is due -5 days (most overdue) ... cards[0] is due -1 day (least overdue).
-
-        let batch = get_study_batch_inner(&conn, Some(&deck.id), 3, false).unwrap();
-
-        let ids: std::collections::HashSet<&str> =
-            batch.items.iter().map(|i| i.card_id.as_str()).collect();
-        assert_eq!(ids.len(), 3);
-        for most_overdue in &cards[2..5] {
-            assert!(ids.contains(most_overdue.id.as_str()));
-        }
-        for least_overdue in &cards[0..2] {
-            assert!(!ids.contains(least_overdue.id.as_str()));
-        }
-    }
-
-    #[test]
-    fn get_study_batch_fills_remaining_slots_with_new_cards_after_due_reviews() {
-        let conn = db::test_connection();
-        let deck = new_deck(&conn, "Deck");
-        let now = Utc::now();
-        for _ in 0..2 {
-            let card = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
-            let mut fsrs_card = crate::srs::new_card_state(now);
-            fsrs_card.state = State::Review;
-            fsrs_card.reps = 1;
-            fsrs_card.due = now;
-            db::review_state::upsert(&conn, &card.id, Direction::FaceOneToTwo, &fsrs_card).unwrap();
-        }
-        for _ in 0..5 {
-            new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
-        }
-
-        let batch = get_study_batch_inner(&conn, Some(&deck.id), 4, false).unwrap();
-
-        assert_eq!(
-            batch.items.len(),
-            4,
-            "2 due reviews plus 2 new cards to fill the remaining slots"
-        );
-    }
-
-    #[test]
-    fn get_study_batch_overflows_the_limit_rather_than_splitting_a_cards_directions() {
-        let conn = db::test_connection();
-        let deck = new_deck(&conn, "Deck");
-        for _ in 0..3 {
-            new_card(&conn, &deck.id, Direction::all().to_vec(), 1);
-        }
-
-        let batch = get_study_batch_inner(&conn, Some(&deck.id), 3, false).unwrap();
-
-        assert_eq!(
-            batch.items.len(),
-            4,
-            "the 2nd bidirectional card's both directions land in the batch, one more than the limit of 3"
-        );
-        let distinct_cards: std::collections::HashSet<&str> =
-            batch.items.iter().map(|i| i.card_id.as_str()).collect();
-        assert_eq!(distinct_cards.len(), 2);
-    }
-
-    #[test]
-    fn get_study_batch_caps_new_cards_at_the_daily_limit_counting_cards_not_items() {
-        let conn = db::test_connection();
-        let mut deck = new_deck(&conn, "Deck");
-        for _ in 0..3 {
-            new_card(&conn, &deck.id, Direction::all().to_vec(), 1);
-        }
-        deck.new_cards_per_day = Some(2);
-        db::decks::update(&conn, &deck).unwrap();
-
-        let batch = get_study_batch_inner(&conn, Some(&deck.id), 100, false).unwrap();
-
-        let distinct_cards: std::collections::HashSet<&str> =
-            batch.items.iter().map(|i| i.card_id.as_str()).collect();
-        assert_eq!(distinct_cards.len(), 2);
-        assert_eq!(batch.items.len(), 4); // 2 cards x 2 directions each
-    }
-
-    #[test]
-    fn get_study_batch_excludes_new_cards_once_the_cap_is_already_spent_today_and_reports_the_bonus_pool(
-    ) {
-        let conn = db::test_connection();
-        let mut deck = new_deck(&conn, "Deck");
-        deck.new_cards_per_day = Some(1);
-        db::decks::update(&conn, &deck).unwrap();
-        let already_introduced = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
-        submit_review_inner(
+        let less_overdue = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
+        make_due_review(
             &conn,
-            SubmitReviewInput {
-                card_id: already_introduced.id,
-                direction: Direction::FaceOneToTwo,
-                rating: Rating::Good,
-            },
-        )
-        .unwrap();
+            &less_overdue.id,
+            Direction::FaceOneToTwo,
+            now - Duration::days(1),
+        );
+        let more_overdue = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
+        make_due_review(
+            &conn,
+            &more_overdue.id,
+            Direction::FaceOneToTwo,
+            now - Duration::days(5),
+        );
+
+        let item = get_next_study_item_inner(&conn, Some(&deck.id), None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(item.card_id, more_overdue.id);
+    }
+
+    #[test]
+    fn get_next_study_item_returns_a_due_review_before_a_new_card() {
+        let conn = db::test_connection();
+        let deck = new_deck(&conn, "Deck");
+        let now = Utc::now();
+        let reviewed = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
+        make_due_review(&conn, &reviewed.id, Direction::FaceOneToTwo, now);
         new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
 
-        let batch = get_study_batch_inner(&conn, Some(&deck.id), 10, false).unwrap();
+        let item = get_next_study_item_inner(&conn, Some(&deck.id), None)
+            .unwrap()
+            .unwrap();
 
-        assert!(
-            batch.items.is_empty(),
-            "the just-introduced card is in a short-term Learning step, not due yet, \
-             and the 2nd new card is beyond today's cap of 1"
-        );
-        assert_eq!(batch.bonus_new_available, 1);
+        assert_eq!(item.card_id, reviewed.id);
     }
 
     #[test]
-    fn get_study_batch_bypasses_the_cap_when_requested() {
-        let conn = db::test_connection();
-        let mut deck = new_deck(&conn, "Deck");
-        deck.new_cards_per_day = Some(1);
-        db::decks::update(&conn, &deck).unwrap();
-        for _ in 0..3 {
-            new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
-        }
-
-        let capped = get_study_batch_inner(&conn, Some(&deck.id), 10, false).unwrap();
-        assert_eq!(capped.items.len(), 1);
-
-        let bypassed = get_study_batch_inner(&conn, Some(&deck.id), 10, true).unwrap();
-        assert_eq!(bypassed.items.len(), 3);
-    }
-
-    #[test]
-    fn ordered_new_candidates_introduces_lower_levels_before_higher_ones() {
+    fn get_next_study_item_introduces_lower_levels_before_higher_ones() {
         let conn = db::test_connection();
         let deck = new_deck(&conn, "Deck");
-        let lvl2 = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 2);
+        new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 2);
         let lvl1 = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
 
-        let mut rng = rand::thread_rng();
-        let ordered = ordered_new_candidates(&conn, &deck.id, &mut rng).unwrap();
+        let item = get_next_study_item_inner(&conn, Some(&deck.id), None)
+            .unwrap()
+            .unwrap();
 
-        let ids: Vec<&str> = ordered.iter().map(|c| c.card_id.as_str()).collect();
-        let lvl1_pos = ids.iter().position(|id| *id == lvl1.id).unwrap();
-        let lvl2_pos = ids.iter().position(|id| *id == lvl2.id).unwrap();
-        assert!(lvl1_pos < lvl2_pos);
+        assert_eq!(item.card_id, lvl1.id);
     }
 
     #[test]
-    fn hydrate_preserves_the_given_order() {
+    fn get_next_study_item_excludes_the_given_item_from_due_reviews() {
         let conn = db::test_connection();
         let deck = new_deck(&conn, "Deck");
-        let card_a = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
-        let card_b = new_card(&conn, &deck.id, vec![Direction::FaceTwoToOne], 1);
-
-        let items = hydrate(
+        let now = Utc::now();
+        let more_overdue = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
+        make_due_review(
             &conn,
-            vec![
-                (card_b.id.clone(), Direction::FaceTwoToOne),
-                (card_a.id.clone(), Direction::FaceOneToTwo),
-            ],
-        )
-        .unwrap();
+            &more_overdue.id,
+            Direction::FaceOneToTwo,
+            now - Duration::days(5),
+        );
+        let less_overdue = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
+        make_due_review(
+            &conn,
+            &less_overdue.id,
+            Direction::FaceOneToTwo,
+            now - Duration::days(1),
+        );
 
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].card_id, card_b.id);
-        assert_eq!(items[1].card_id, card_a.id);
+        let exclude = ExcludeItem {
+            card_id: more_overdue.id.clone(),
+            direction: Direction::FaceOneToTwo,
+        };
+        let item = get_next_study_item_inner(&conn, Some(&deck.id), Some(exclude))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(item.card_id, less_overdue.id);
+    }
+
+    #[test]
+    fn get_next_study_item_returns_none_when_the_only_due_item_is_excluded() {
+        let conn = db::test_connection();
+        let deck = new_deck(&conn, "Deck");
+        let card = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
+        make_due_review(&conn, &card.id, Direction::FaceOneToTwo, Utc::now());
+
+        let exclude = ExcludeItem {
+            card_id: card.id,
+            direction: Direction::FaceOneToTwo,
+        };
+        let item = get_next_study_item_inner(&conn, Some(&deck.id), Some(exclude)).unwrap();
+
+        assert!(item.is_none());
+    }
+
+    /// This is the regression test for the bug the `exclude` parameter
+    /// exists to prevent: fetching twice in a row without an intervening
+    /// `submit_review` must not return the same not-yet-reviewed new card
+    /// both times — nothing in the DB changes between those two calls
+    /// otherwise, so the second call would deterministically re-offer the
+    /// first call's result.
+    #[test]
+    fn get_next_study_item_excludes_a_new_card_already_shown_as_current() {
+        let conn = db::test_connection();
+        let deck = new_deck(&conn, "Deck");
+        new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
+
+        let first = get_next_study_item_inner(&conn, Some(&deck.id), None)
+            .unwrap()
+            .unwrap();
+        let exclude = ExcludeItem {
+            card_id: first.card_id,
+            direction: first.direction,
+        };
+        let second = get_next_study_item_inner(&conn, Some(&deck.id), Some(exclude)).unwrap();
+
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn get_next_study_item_staggers_a_new_bidirectional_cards_second_direction() {
+        let conn = db::test_connection();
+        let deck = new_deck(&conn, "Deck");
+        let card = new_card(&conn, &deck.id, Direction::all().to_vec(), 1);
+
+        let first = get_next_study_item_inner(&conn, Some(&deck.id), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.direction, Direction::FaceOneToTwo); // deck default intro_direction
+
+        let sibling_state = db::review_state::get(&conn, &card.id, Direction::FaceTwoToOne)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sibling_state.state, State::New);
+        assert!(sibling_state.due > Utc::now());
+
+        // Excluding the already-shown direction surfaces nothing else right
+        // now — the sibling is staggered, not immediately offered.
+        let exclude = ExcludeItem {
+            card_id: card.id,
+            direction: Direction::FaceOneToTwo,
+        };
+        let next = get_next_study_item_inner(&conn, Some(&deck.id), Some(exclude)).unwrap();
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn get_next_study_item_respects_the_decks_intro_direction_setting() {
+        let conn = db::test_connection();
+        let mut deck = new_deck(&conn, "Deck");
+        deck.intro_direction = Direction::FaceTwoToOne;
+        db::decks::update(&conn, &deck).unwrap();
+        new_card(&conn, &deck.id, Direction::all().to_vec(), 1);
+
+        let item = get_next_study_item_inner(&conn, Some(&deck.id), None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(item.direction, Direction::FaceTwoToOne);
+    }
+
+    #[test]
+    fn get_next_study_item_does_not_stagger_a_single_direction_card() {
+        let conn = db::test_connection();
+        let deck = new_deck(&conn, "Deck");
+        let card = new_card(&conn, &deck.id, vec![Direction::FaceOneToTwo], 1);
+
+        get_next_study_item_inner(&conn, Some(&deck.id), None)
+            .unwrap()
+            .unwrap();
+
+        // No other direction was ever seeded for this card, so there's
+        // nothing to have staggered — just a sanity check that introducing
+        // a single-direction card doesn't error or touch anything odd.
+        assert!(
+            db::review_state::get(&conn, &card.id, Direction::FaceTwoToOne)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -607,7 +617,7 @@ mod tests {
             .unwrap();
         assert_eq!(log_count, 1);
 
-        let candidates = db::cards::new_card_candidates(&conn, &deck.id).unwrap();
+        let candidates = db::cards::new_card_candidates(&conn, &deck.id, Utc::now(), None).unwrap();
         assert!(candidates.iter().any(|c| c.card_id == card.id));
     }
 
