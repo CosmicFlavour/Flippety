@@ -67,17 +67,21 @@ jobs:
           args: ${{ matrix.args }}
 
   # Verified working locally with these exact SDK/NDK/JDK versions (see
-  # commit history) — `tauri android init` + `tauri android build --debug`
-  # produce an installable APK.
-  #
-  # Produces a debug-signed APK (sideloadable, not a signed release build).
-  # Play Store distribution needs a release keystore + signing config, which
-  # isn't set up here.
+  # commit history) — `tauri android init` + `tauri android build` produce
+  # an installable APK and an AAB for Play Store, both release-signed (see
+  # "configure Android release signing" below). `gen/android` is gitignored
+  # and regenerated fresh by `android init` on every run, so the signing
+  # config can't live as a one-time edit to the generated build.gradle.kts —
+  # it's patched into it on every run instead.
   build-android:
     needs: create-release
     permissions:
       contents: write
     runs-on: ubuntu-22.04
+    env:
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -110,20 +114,59 @@ jobs:
         # only exists after `android init` — without this the app ships with
         # a default placeholder icon instead of the real one.
         run: pnpm tauri icon src-tauri/icons/icon.png
-      - name: tauri android build (debug APK)
-        run: pnpm tauri android build --ci --debug --apk
-      - name: rename APK for release
+      - name: configure Android release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > src-tauri/gen/android/app/release.jks
+          python3 - <<'PATCH'
+          path = "src-tauri/gen/android/app/build.gradle.kts"
+          content = open(path).read()
+
+          signing_block = (
+              '    signingConfigs {\n'
+              '        create("release") {\n'
+              '            storeFile = file("release.jks")\n'
+              '            storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")\n'
+              '            keyAlias = System.getenv("ANDROID_KEY_ALIAS")\n'
+              '            keyPassword = System.getenv("ANDROID_KEY_PASSWORD")\n'
+              '        }\n'
+              '    }\n'
+          )
+          marker = "    buildTypes {"
+          assert marker in content, "build.gradle.kts shape changed — update the signing patch"
+          content = content.replace(marker, signing_block + marker, 1)
+
+          release_marker = 'getByName("release") {\n            isMinifyEnabled = true'
+          assert release_marker in content, "release buildType shape changed — update the signing patch"
+          content = content.replace(
+              release_marker,
+              'getByName("release") {\n            signingConfig = signingConfigs.getByName("release")\n            isMinifyEnabled = true',
+              1,
+          )
+
+          open(path, "w").write(content)
+          PATCH
+      - name: tauri android build (release APK + AAB)
+        run: pnpm tauri android build --ci --apk --aab
+      - name: locate and rename build outputs
         run: |
           apk="$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n1)"
-          cp "$apk" "flippety-${{ github.ref_name }}-android-debug.apk"
-      - name: upload APK artifact
+          aab="$(find src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' | head -n1)"
+          cp "$apk" "flippety-${{ github.ref_name }}-android.apk"
+          cp "$aab" "flippety-${{ github.ref_name }}-android.aab"
+      - name: upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: flippety-android-debug
-          path: flippety-${{ github.ref_name }}-android-debug.apk
+          name: flippety-android
+          path: |
+            flippety-${{ github.ref_name }}-android.apk
+            flippety-${{ github.ref_name }}-android.aab
           if-no-files-found: error
-      - name: attach APK to release
+      - name: attach build outputs to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: flippety-${{ github.ref_name }}-android-debug.apk
+          files: |
+            flippety-${{ github.ref_name }}-android.apk
+            flippety-${{ github.ref_name }}-android.aab

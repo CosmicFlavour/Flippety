@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Android signing keystores should never be committed.
+*.jks
+*.keystore
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
